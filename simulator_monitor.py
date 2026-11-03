@@ -298,10 +298,15 @@ def receive_exactly(connection: socket.socket, length: int) -> bytes:
 
 
 class ModbusExceptionError(ValueError):
-    def __init__(self, function: int, code: int) -> None:
+    def __init__(self, function: int, code: int, address: int, count: int) -> None:
         self.function = function
         self.code = code
-        super().__init__(f"Modbus exception code {code}")
+        self.address = address
+        self.count = count
+        super().__init__(
+            f"Modbus FC {function} read at address {address}, count {count}: "
+            f"exception code {code}"
+        )
 
 
 def read_bits(
@@ -329,7 +334,7 @@ def read_bits(
         exception_code = response_pdu[1] if len(response_pdu) > 1 else "unknown"
         if not isinstance(exception_code, int):
             raise ValueError(f"Modbus exception code {exception_code}")
-        raise ModbusExceptionError(function, exception_code)
+        raise ModbusExceptionError(function, exception_code, 0, count)
     expected_bytes = (count + 7) // 8
     if (
         len(response_pdu) != expected_bytes + 2
@@ -347,19 +352,24 @@ def read_bits(
 def read_snapshot(
     connection: socket.socket, transaction_id: int, unit_id: int
 ) -> tuple[dict[str, bool], dict[str, bool], int]:
-    legacy_input_map = False
-    try:
-        input_values = read_bits(connection, transaction_id, unit_id, 2, len(INPUTS))
-    except ModbusExceptionError as error:
-        if error.function != 2 or error.code != 2:
-            raise
-        legacy_input_map = True
-        input_values = read_bits(connection, transaction_id, unit_id, 2, len(INPUTS) - 1)
+    requested_count = len(INPUTS)
+    while True:
+        try:
+            input_values = read_bits(
+                connection, transaction_id, unit_id, 2, requested_count
+            )
+            break
+        except ModbusExceptionError as error:
+            if error.function != 2 or error.code != 2 or requested_count == 1:
+                raise
+            requested_count -= 1
+            transaction_id = (transaction_id + 1) & 0xFFFF
     transaction_id = (transaction_id + 1) & 0xFFFF
     coils = read_bits(connection, transaction_id, unit_id, 1, len(COILS))
     transaction_id = (transaction_id + 1) & 0xFFFF
-    if legacy_input_map:
-        input_values.append(
+    input_values.extend([False] * (len(INPUTS) - len(input_values)))
+    if requested_count < len(INPUTS):
+        input_values[6] = (
             input_values[2] or input_values[3] or coils[0] or coils[1]
         )
     return (
