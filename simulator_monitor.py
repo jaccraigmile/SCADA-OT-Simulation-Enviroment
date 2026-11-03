@@ -203,6 +203,15 @@ HMI_PAGE = """<!doctype html>
       element.className = "state " + (isSafety && !active ? "fault" : active ? "on" : "off");
     }
     function applyStatus(data) {
+      if (
+        lastData &&
+        lastData.coils.Grab &&
+        !data.coils.Grab &&
+        armAngle >= 88 &&
+        !data.inputs.RobotDetected
+      ) {
+        boxX = 140;
+      }
       lastData = data;
       for (const name of inputNames) setSignal(name, data.inputs[name], name === "SafetyDoorClosed");
       for (const name of coilNames) setSignal(name, data.coils[name]);
