@@ -121,16 +121,10 @@ class ModbusWriteMultipleCoils(Packet):
         ByteField("function_code", 15),
         ShortField("reference_number", 0),
         ShortField("bit_count", 5),
-        ByteField("byte_count", None),
+        ByteField("byte_count", 1),
         BitField("coil_data", 0x1F, 8),
     ]
 
-    def post_build(self, pkt, pay):
-        if self.byte_count is None:
-            count = (self.bit_count + 7) // 8
-            pkt = pkt[:5] + struct.pack("!B", count) + pkt[6:]
-
-        return pkt + pay
 
 
 def validate_frame(pkt):
@@ -143,7 +137,7 @@ def validate_frame(pkt):
             f"Invalid coil count {modbus.bit_count}"
         )
 
-    if modbus.byte_count != expected_byte_count:
+    if modbus.byte_count != 1:
         raise ValueError(
             f"Byte count mismatch "
             f"(expected {expected_byte_count}, got {modbus.byte_count})"
