@@ -1,6 +1,8 @@
 from scapy.all import *  
 
 flag = 1
+your_iface = "eth2"
+vicim_ip = "10.77.20.10"
 
 while flag:
     OPENPLC_FRAMES = sniff(iface=your_iface, count=4, 
