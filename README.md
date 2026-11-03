@@ -19,7 +19,7 @@ by the current code.
 
 | Component | Role |
 | --- | --- |
-| [factoryio_simulator.py](./factoryio_simulator.py) | Headless process model and Modbus/TCP server. Models the conveyor, box, picker, safety-door input, five output coils, and live console status. |
+| [factoryio_simulator.py](./factoryio_simulator.py) | Headless process model and Modbus/TCP server. Models the conveyor, box, picker, safety-door input, and five output coils; process status is shown on request at the simulator prompt. |
 | [factoryio_modbus_controller.py](./factoryio_modbus_controller.py) | Optional standalone Python Modbus/TCP client/controller. Runs a pick-and-place sequence without OpenPLC. |
 | [simulator_monitor.py](./simulator_monitor.py) | Browser-based, read-only HMI. Polls simulator inputs/coils and displays process signals and inferred motion. |
 | [reset_lab_process.py](./reset_lab_process.py) | Resets the running simulator's process state to its startup baseline through a loopback-only endpoint. |
@@ -73,6 +73,9 @@ The simulator emits a box automatically every five seconds by default.
 Controller coils move the box and picker; opening the simulated safety door
 pauses process motion. The simulator is a behavioral training model, not a
 3D Factory I/O scene or physical-control system.
+The conveyor takes about 6.7 seconds to carry a box from the emitter to the
+pickup sensor, and a full picker rotation takes about 1.6 seconds so motion is
+easy to observe in the HMI.
 
 Addresses are zero-based. Discrete inputs are read with function code 02;
 coils are read with FC 01 and can be written with FC 05 or FC 15. The
@@ -86,6 +89,7 @@ introductory OpenPLC configuration uses FC 05 for coil writes.
 | 3 | Discrete input | RobotDetected | Picker is down over a box. |
 | 4 | Discrete input | MovingZ | Picker Z axis is transitioning. |
 | 5 | Discrete input | Rotating | Picker is rotating. |
+| 6 | Discrete input | BoxPresent | A box is on the conveyor or held by the picker. |
 | 0 | Coil | Conveyor | Advances a box on the conveyor. |
 | 1 | Coil | Grab | Picks up or releases a box, depending on process position. |
 | 2 | Coil | ExtendZ | Extends the picker; off retracts it. |

@@ -69,37 +69,91 @@ sudo sysctl --system
 ```
 
 Configure Kali to route between `PLC-LAB` and `SIM-LAB` and masquerade traffic
-from both lab subnets out its internet uplink. For example, with `iptables`,
-substitute your actual interface names for `WAN_IF`, `PLC_IF`, and `SIM_IF`.
-Use the `FORWARD` default-drop command below only on a dedicated Kali gateway;
-if Kali already routes other networks, integrate the allow rules without
-changing its existing policy.
+from the lab subnets out its internet uplink. The following example uses
+`nftables`. Replace the interface names with those shown by `ip -br address`.
+The base chain has a default-drop policy; use it only on a dedicated Kali lab
+gateway. If Kali routes other networks, integrate equivalent rules into its
+existing nftables policy instead of adding a competing default-drop chain.
 
-```bash
-WAN_IF="your-internet-interface"
-PLC_IF="your-plc-lab-interface"
-SIM_IF="your-sim-lab-interface"
+Create `/etc/nftables.d/plc-lab.nft` with the following content:
 
-sudo iptables -P FORWARD DROP
-sudo iptables -A FORWARD -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
-sudo iptables -A FORWARD -i "$PLC_IF" -o "$WAN_IF" -s 10.77.10.0/24 -j ACCEPT
-sudo iptables -A FORWARD -i "$SIM_IF" -o "$WAN_IF" -s 10.77.20.0/24 -j ACCEPT
-sudo iptables -A FORWARD -i "$PLC_IF" -o "$SIM_IF" -s 10.77.10.10 -d 10.77.20.10 -p tcp --dport 1502 -m conntrack --ctstate NEW,ESTABLISHED -j ACCEPT
-sudo iptables -t nat -A POSTROUTING -s 10.77.10.0/24 -o "$WAN_IF" -j MASQUERADE
-sudo iptables -t nat -A POSTROUTING -s 10.77.20.0/24 -o "$WAN_IF" -j MASQUERADE
+```nft
+define WAN_IF = "your-internet-interface"
+define PLC_IF = "your-plc-lab-interface"
+define SIM_IF = "your-sim-lab-interface"
+
+table inet plc_lab_filter {
+    chain forward {
+        type filter hook forward priority filter; policy drop;
+
+        ct state established,related counter accept
+
+        iifname $PLC_IF oifname $WAN_IF ip saddr 10.77.10.0/24 counter accept
+        iifname $SIM_IF oifname $WAN_IF ip saddr 10.77.20.0/24 counter accept
+
+        iifname $PLC_IF oifname $SIM_IF ip saddr 10.77.10.10 ip daddr 10.77.20.10 tcp dport 1502 ct state new,established counter accept
+    }
+}
+
+table ip plc_lab_nat {
+    chain postrouting {
+        type nat hook postrouting priority srcnat; policy accept;
+
+        ip saddr 10.77.10.0/24 oifname $WAN_IF counter masquerade
+        ip saddr 10.77.20.0/24 oifname $WAN_IF counter masquerade
+    }
+}
 ```
 
-These are example additions, not a complete firewall policy. On a dedicated
-Kali lab gateway, use a default-deny FORWARD policy and then add the required
-allow rules; if Kali already routes other networks, integrate an equivalent
-policy without disrupting them. Apply rules in the firewall system already
-managing Kali, and make them persistent across reboots. Keep forwarding from
-the internet uplink to lab interfaces blocked for new connections; permit
-established return traffic. Do not flush the firewall or enable unrestricted
-forwarding. Keep the two lab VNets separate: allow only the
-controller-to-simulator TCP `1502` flow between them, plus its established
-replies. The HMI connects locally from Kali's SIM-LAB address
-`10.77.20.1`, so it does not need a forwarded rule.
+In the nftables configuration file `/etc/nftables.conf`, add this include
+without removing existing rules or includes:
+
+```nft
+include "/etc/nftables.d/plc-lab.nft"
+```
+
+Check the configuration before loading it:
+
+```bash
+sudo nft -c -f /etc/nftables.conf
+```
+
+On a dedicated lab gateway, apply the lab rules without flushing other
+tables:
+
+```bash
+sudo nft -f /etc/nftables.d/plc-lab.nft
+```
+
+For persistence, use the firewall manager already responsible for Kali.
+If Kali's `nftables` systemd service is the sole firewall manager, ensure
+`/etc/nftables.conf` includes the lab file and preserves any other required
+rules before enabling that service. Then enable it to load the configuration
+at boot:
+
+```bash
+sudo systemctl enable nftables
+```
+
+Do not start a second firewall manager or apply a configuration containing
+`flush ruleset` on a shared gateway.
+
+If reloading after changing the lab file, remove only the two lab-owned
+tables before reapplying; do not flush the whole ruleset:
+
+```bash
+sudo nft delete table inet plc_lab_filter
+sudo nft delete table ip plc_lab_nat
+sudo nft -f /etc/nftables.d/plc-lab.nft
+```
+
+These are example rules, not a complete firewall policy. The forwarding
+chain permits established return traffic, controller and simulator outbound
+internet traffic, and the controller-to-simulator TCP `1502` flow. Its
+default-drop policy blocks other forwarded traffic, including new
+internet-to-lab connections. Do not expose guest management services or
+enable unrestricted forwarding. The HMI connects locally from Kali's SIM-LAB
+address `10.77.20.1`, so it does not need a forwarded rule.
 
 The upstream network must allow Kali to reach the internet. Use the network's
 approved DNS configuration; the forwarding and NAT rules allow lab guests to
@@ -191,11 +245,8 @@ reachable through the lab network.
 Keep the process running. Its prompt accepts `status`, `start`, `box`,
 `door open`, `door close`, `auto on`, `auto off`, and `reset`. For this setup,
 leave automatic box emission enabled. A box appears after about five seconds.
-The simulator prints the
-current process summary every two seconds and reports events such as box
-emission, output coil changes, and picker motion. Enter `status` for an
-immediate snapshot. Use `--status-interval 0` to disable periodic summaries
-while retaining event logs.
+The simulator does not print periodic process summaries or event messages.
+Enter `status` at the `sim>` prompt to request a current process snapshot.
 
 ### Reset the simulator process
 
@@ -275,21 +326,82 @@ lab networks and the internet-facing bridge with its WAN NIC. Configure the
 addresses and routes in the table; do not bridge the VNets or attach lab
 guests directly to the WAN bridge.
 
-For internet egress from the Option A management subnet, add these
-Option-A-only rules to Kali's shared firewall configuration, using the
-interface name for `MGMT`:
+For internet egress from the Option A management subnet, make these
+Option-A-only additions in `/etc/nftables.d/plc-lab.nft`. Add the interface
+definition alongside the other `define` statements at the top of the file:
 
-```bash
-MGMT_IF="your-mgmt-interface"
-sudo iptables -A FORWARD -i "$MGMT_IF" -o "$WAN_IF" -s 10.77.0.0/24 -j ACCEPT
-sudo iptables -t nat -A POSTROUTING -s 10.77.0.0/24 -o "$WAN_IF" -j MASQUERADE
+```nft
+define MGMT_IF = "your-mgmt-interface"
 ```
 
-Configure the Runtime's default route through Kali's MGMT address
-(`10.77.0.1`) for management/internet egress, and add the more specific route
-to `10.77.20.0/24` through its data-side Kali address (`10.77.10.1`). This
-specific route ensures Modbus requests pass Kali. Configure the Control VM's
-default gateway as `10.77.0.1` and the simulator's as `10.77.20.1`.
+Add this rule inside `chain forward`, before its closing brace:
+
+```nft
+iifname $MGMT_IF oifname $WAN_IF ip saddr 10.77.0.0/24 counter accept
+```
+
+Also add the following Option-A-only rule inside the `postrouting` chain:
+
+```nft
+ip saddr 10.77.0.0/24 oifname $WAN_IF counter masquerade
+```
+
+Include these additions before validating/loading the nftables configuration.
+They permit the Control VM and Runtime management subnet to use Kali for
+outbound internet egress; return traffic is covered by the established-state
+rule. Do not add a new inbound WAN-to-MGMT accept rule.
+
+The Runtime has two NICs, so configure its routes against the interface on
+the matching subnet:
+
+- Default route for management and internet egress: via Kali MGMT
+  `10.77.0.1` on the Runtime MGMT NIC (`10.77.0.10/24`).
+- Specific route to the simulator subnet `10.77.20.0/24`: via Kali
+  PLC-LAB `10.77.10.1` on the Runtime PLC-LAB NIC (`10.77.10.10/24`).
+
+Do **not** set `10.77.10.1` as the default gateway on the MGMT NIC. The
+gateway must be directly reachable on the subnet of the interface using it.
+For example, first identify the Runtime's actual interface names:
+
+```bash
+ip -br address
+ip route
+```
+
+Then, substituting the names shown for the Runtime's MGMT and PLC-LAB NICs,
+apply these temporary routes:
+
+```bash
+MGMT_IF="runtime-mgmt-interface"
+PLC_IF="runtime-plc-lab-interface"
+
+sudo ip route replace default via 10.77.0.1 dev "$MGMT_IF"
+sudo ip route replace 10.77.20.0/24 via 10.77.10.1 dev "$PLC_IF"
+```
+
+These `ip route` commands do not persist across reboot. Make the same
+gateway and subnet-route settings persistent using the network configuration
+manager installed in the Runtime guest. Configure the Control VM's default
+gateway as `10.77.0.1` and the simulator's as `10.77.20.1`.
+
+Verify that each destination selects the intended Runtime interface and
+gateway:
+
+```bash
+ip route get 8.8.8.8
+ip route get 10.77.20.10
+```
+
+The public destination should use the default route via `10.77.0.1` on MGMT;
+the simulator destination should use `10.77.10.1` on PLC-LAB. For the
+documented interface layout, the route table should be equivalent to:
+
+```text
+default via 10.77.0.1 dev <MGMT_IF>
+10.77.0.0/24 dev <MGMT_IF> src 10.77.0.10
+10.77.10.0/24 dev <PLC_IF> src 10.77.10.10
+10.77.20.0/24 via 10.77.10.1 dev <PLC_IF>
+```
 
 The management and process paths are distinct:
 
@@ -302,6 +414,18 @@ Lab internet egress -> Kali's attached network -> Kali WAN NIC
 
 #### Option A troubleshooting
 
+- **Runtime has no internet access:** Check `ip -br address` and
+  `ip route get 8.8.8.8` on the Runtime. Its MGMT NIC `10.77.0.10/24` must
+  use Kali MGMT `10.77.0.1` as the default gateway. If the default route
+  instead uses `10.77.10.1` on the MGMT interface, replace it using the
+  commands above; `10.77.10.1` belongs on the separate PLC-LAB NIC and is
+  only the next hop for `10.77.20.0/24`. Then verify Kali's WAN route,
+  IPv4 forwarding, and the Option A MGMT forwarding and masquerade rules.
+  On Kali, inspect `sudo nft list chain inet plc_lab_filter forward` and
+  `sudo nft list chain ip plc_lab_nat postrouting` while retrying the
+  connection; increasing rule counters help locate which hop is failing.
+  If another firewall manager controls Kali's nftables rules, inspect that
+  active configuration and integrate the lab rules there.
 - **Control VM cannot connect to Runtime:** Check MGMT addresses and
   reachability, then verify the Runtime v4/Edge Device registration and the
   deployment-specific management ports.
@@ -384,6 +508,10 @@ In the new editor, create a **Remote Device**, not a Modbus Server:
    | 4 | `MovingZ` |
    | 5 | `Rotating` |
 
+   This OpenPLC example needs the first six inputs. The HMI independently
+   polls the additional `BoxPresent` input at address `6` so it only animates
+   a box when one is actually in the process.
+
 4. Add five write groups. Use **Write Single Coil (FC 5)**, length `1`, and
    cycle time `100` ms for each:
 
@@ -438,11 +566,12 @@ Upload** and **Play** to run on the vPLC. Uploading does not start the PLC.
 1. In the simulator prompt, enter `status`. Initially, the door input should
    be `True`; a newly emitted box begins away from the sensor.
 2. Open the HMI at `http://127.0.0.1:8080/` in Kali's browser. It
-   refreshes the six discrete inputs and five coils, renders an approximate
+   refreshes the seven discrete inputs and five coils, renders an approximate
    process overview, and sends FC 2 and FC 1 read requests only. Its polling
    appears in the capture as a separate TCP connection from Kali.
 3. Start the Kali capture, then run the PLC. In Wireshark, look for periodic
-   FC 2 requests and responses. The configured read group polls all six inputs.
+   FC 2 requests and responses. The configured OpenPLC read group polls the
+   first six inputs; the HMI polls all seven.
 4. At the simulator prompt, enter `start`. The start input is pulsed for
    250 ms, so the HMI may show it briefly; watch the editor debugger for
    the latched `RUN` value. The conveyor coil should turn on.
@@ -527,7 +656,7 @@ controller-to-simulator interface or bypass route.
    python3 factoryio_modbus_controller.py --host 10.77.20.10 --port 1502 --unit-id 1
    ```
 
-   It polls the six discrete inputs with FC 2, writes coils with FC 5, and
+   It polls the first six discrete inputs with FC 2, writes coils with FC 5, and
    prints its state and output changes. It starts in `WAIT_START`; at the
    simulator's `sim>` prompt, enter `start` to pulse `StartButton` and begin
    the conveyor/pick/place/return sequence. Enter `door open` to stop outputs

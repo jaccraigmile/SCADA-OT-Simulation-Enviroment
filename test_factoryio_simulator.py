@@ -34,13 +34,21 @@ class ModbusProcessTests(unittest.TestCase):
     def setUp(self):
         self.process = Process(auto_emitter=False)
 
-    def test_reads_six_discrete_inputs(self):
+    def test_reads_first_six_discrete_inputs(self):
         response = process_pdu(self.process, b"\x02\x00\x00\x00\x06")
 
         self.assertEqual(len(response), 3)
         self.assertEqual(response[0], 2)
         self.assertEqual(response[1], 1)
         self.assertEqual(response[2] & 0b00000010, 0b00000010)
+
+    def test_reads_box_present_input(self):
+        self.process.add_box()
+
+        self.assertEqual(
+            process_pdu(self.process, b"\x02\x00\x06\x00\x01"),
+            b"\x02\x01\x01",
+        )
 
     def test_reads_and_writes_coils(self):
         response = process_pdu(self.process, b"\x05\x00\x00\xff\x00")
@@ -66,7 +74,6 @@ class ModbusProcessTests(unittest.TestCase):
         self.process.z_down = True
         self.process.z_transition_until = time.monotonic() + 10
         self.process.robot_angle = 1.0
-        self.process.rotation_transition_until = time.monotonic() + 10
         self.process.rotation_direction = 1
         self.process.request_counts[2] = 15
         self.process.drain_events()
@@ -75,7 +82,7 @@ class ModbusProcessTests(unittest.TestCase):
 
         self.assertEqual(
             self.process.read_inputs(),
-            [False, True, False, False, False, False],
+            [False, True, False, False, False, False, False],
         )
         self.assertEqual(self.process.read_coils(0, COIL_COUNT), [False] * COIL_COUNT)
         self.assertIsNone(self.process.box_position)
@@ -129,7 +136,7 @@ class ModbusProcessTests(unittest.TestCase):
 
     def test_rejects_addresses_outside_tutorial_io_map(self):
         self.assertEqual(
-            process_pdu(self.process, b"\x02\x00\x06\x00\x01"),
+            process_pdu(self.process, b"\x02\x00\x07\x00\x01"),
             b"\x82\x02",
         )
         self.assertEqual(
@@ -140,11 +147,28 @@ class ModbusProcessTests(unittest.TestCase):
 
     def test_process_box_moves_and_is_detected(self):
         self.process.add_box()
+        self.assertTrue(self.process.read_inputs()[6])
         self.process.write_coils(0, [True])
         self.process.step(10.0, 4.0)
 
+        self.assertAlmostEqual(self.process.box_position, 0.6)
+        self.assertFalse(self.process.read_inputs()[2])
+
+        self.process.step(14.0, 3.0)
+
         self.assertTrue(self.process.read_inputs()[2])
         self.assertIn("Box reached the pickup sensor", self.process.drain_events())
+
+    def test_rotating_input_tracks_active_motion(self):
+        self.process.write_coils(3, [True])
+        self.process.step(time.monotonic(), 1.0)
+
+        self.assertTrue(self.process.read_inputs()[5])
+
+        self.process.write_coils(3, [False])
+        self.process.step(time.monotonic(), 0.05)
+
+        self.assertFalse(self.process.read_inputs()[5])
 
     def test_open_door_prevents_process_motion(self):
         self.process.add_box()
@@ -225,7 +249,7 @@ class ModbusProcessTests(unittest.TestCase):
                 inputs, coils, transaction_id = read_snapshot(client, 0, 1)
             self.assertEqual(
                 inputs,
-                dict(zip(INPUT_NAMES, [False, True, False, False, False, False])),
+                dict(zip(INPUT_NAMES, [False, True, False, False, False, False, False])),
             )
             self.assertEqual(len(coils), COIL_COUNT)
             self.assertEqual(transaction_id, 2)
@@ -239,7 +263,7 @@ class ModbusProcessTests(unittest.TestCase):
         state.update(
             {"StartButton": False, "SafetyDoorClosed": False,
              "BoxAtSensor": True, "RobotDetected": False,
-             "MovingZ": False, "Rotating": False},
+             "MovingZ": False, "Rotating": False, "BoxPresent": True},
             {"Conveyor": True, "Grab": False, "ExtendZ": False,
              "RotateCW": False, "RotateCCW": False},
         )
@@ -253,6 +277,14 @@ class ModbusProcessTests(unittest.TestCase):
                 self.assertEqual(response.status, 200)
                 self.assertIn("Process overview", page)
                 self.assertIn("Read-only HMI", page)
+                self.assertIn("BoxPresent", page)
+                self.assertIn("setInterval(refresh, 100)", page)
+                self.assertIn(
+                    'rotate(" + armAngleDegrees + ")',
+                    page,
+                )
+                self.assertIn('setAttribute("y2", armLength)', page)
+                self.assertIn('heldX + 19', page)
             with urlopen(base_url + "/api/status", timeout=2) as response:
                 payload = json.loads(response.read())
             self.assertTrue(payload["connected"])
@@ -265,6 +297,7 @@ class ModbusProcessTests(unittest.TestCase):
             server.server_close()
 
     def test_hmi_poller_updates_live_state_from_simulator(self):
+        self.process.add_box()
         self.process.write_coils(0, [True])
         server = ModbusServer(("127.0.0.1", 0), self.process)
         server_thread = threading.Thread(target=server.serve_forever)
@@ -286,6 +319,7 @@ class ModbusProcessTests(unittest.TestCase):
             snapshot = state.get()
             self.assertTrue(snapshot["connected"])
             self.assertTrue(snapshot["inputs"]["SafetyDoorClosed"])
+            self.assertTrue(snapshot["inputs"]["BoxPresent"])
             self.assertTrue(snapshot["coils"]["Conveyor"])
             self.assertIsNotNone(snapshot["updated_at"])
         finally:

@@ -50,14 +50,16 @@ The program uses `argparse` for configuration, `socketserver` for Modbus/TCP,
 - Box position, whether the picker holds a box, and the removed-box count.
 - Automatic-emitter state and timing.
 - Five actuator coil values.
-- Picker extension, rotation, and transition timers.
+- Picker extension state, active rotation direction, and transition timing.
 - A bounded event queue and Modbus function-code request counts.
 
 A thread lock protects shared state because the Modbus server, simulation
-loop, reset handler, terminal interface, and status reporter can access it
-concurrently.
+loop, reset handler, and terminal interface can access it concurrently.
 
-`read_inputs()` derives the six discrete-input values from this state.
+`read_inputs()` derives seven discrete-input values from this state, including
+`BoxPresent` so the HMI can distinguish an actual box from an energized
+conveyor with no box. The default conveyor speed takes about 6.7 seconds to
+reach the pickup sensor; a full picker rotation takes about 1.6 seconds.
 `read_coils()` and `write_coils()` access the five output values; writes also
 record output-change events. `step()` advances the process by one simulation
 tick. It handles automatic box emission, pauses physical-model motion while
@@ -97,8 +99,9 @@ source default Modbus port is `502`; the lab command explicitly selects
 ### Terminal and reset HTTP interfaces
 
 `run_cli()` accepts `start`, `box`, `door open`, `door close`, `auto on`,
-`auto off`, `reset`, `status`, `help`, and `quit`. `run_status_reporter()`
-drains process events and prints periodic live summaries.
+`auto off`, `reset`, `status`, `help`, and `quit`. Process events are retained
+in memory for the model but are not automatically printed. The `status`
+command prints a snapshot only when requested.
 
 `ResetServer` is a separate HTTP server bound specifically to
 `127.0.0.1`, default port `8081`. Its `POST /reset` handler calls
@@ -107,9 +110,8 @@ binds to loopback, it is intended to be called on the simulator guest, not
 remotely across the lab network.
 
 `main()` parses and validates command-line values, creates the process and
-both servers, starts the Modbus server, simulation loop, reset listener, and
-status reporter, then runs the interactive terminal. On exit it shuts down
-the reporter and servers.
+both servers, starts the Modbus server, simulation loop, and reset listener,
+then runs the interactive terminal. On exit it shuts down both servers.
 
 ## `factoryio_modbus_controller.py`
 
@@ -135,7 +137,8 @@ then verifies transaction ID, protocol ID, unit ID, response length, and
 function code. It recognizes Modbus exception responses and closes the
 connection when transport or validation errors occur.
 
-`read_inputs()` uses FC 02 to read the six input bits. `write_coil()` uses
+`read_inputs()` uses FC 02 to read the six controller input bits. The HMI
+also reads the seventh `BoxPresent` input. `write_coil()` uses
 FC 05 to write one of the five valid coil addresses and checks that the
 response echoes the request. `write_all_coils_off()` is used to establish a
 known output state on startup and to turn outputs off during normal shutdown.
@@ -206,8 +209,10 @@ instead of being silently treated as a normal reconnect.
 
 `HMI_PAGE` contains the HTML, CSS, SVG process diagram, and JavaScript for
 displaying the inputs, coils, connection state, and approximate process
-motion. The animation infers motion from signals and outputs; exact process
-position and box count are not available through the current Modbus map.
+motion. `BoxPresent` prevents the animation from showing a box before one
+exists. The browser refreshes every 100 ms so short-lived input changes are
+easier to observe. Exact process position and box count are not available
+through the current Modbus map.
 
 `make_handler()` creates an HTTP request handler with two GET routes:
 

@@ -13,11 +13,22 @@ import time
 from dataclasses import dataclass, field
 
 
-INPUT_COUNT = 6
+INPUT_COUNT = 7
 COIL_COUNT = 5
 DEFAULT_MODBUS_PORT = 502
-INPUT_NAMES = ("StartButton", "SafetyDoorClosed", "BoxAtSensor", "RobotDetected", "MovingZ", "Rotating")
+INPUT_NAMES = (
+    "StartButton",
+    "SafetyDoorClosed",
+    "BoxAtSensor",
+    "RobotDetected",
+    "MovingZ",
+    "Rotating",
+    "BoxPresent",
+)
 COIL_NAMES = ("Conveyor", "Grab", "ExtendZ", "RotateCW", "RotateCCW")
+CONVEYOR_SPEED = 0.15
+PICKER_ROTATION_SECONDS = 1.6
+PICKER_Z_TRANSITION_SECONDS = 0.75
 
 
 @dataclass
@@ -36,7 +47,6 @@ class Process:
     z_down: bool = False
     z_transition_until: float = 0.0
     robot_angle: float = 0.0
-    rotation_transition_until: float = 0.0
     rotation_direction: int = 0
     events: deque[str] = field(default_factory=lambda: deque(maxlen=100))
     request_counts: list[int] = field(default_factory=lambda: [0] * 16)
@@ -50,7 +60,8 @@ class Process:
                 self.box_position is not None and self.box_position >= 1.0,
                 self.z_down and self.box_position is not None and self.robot_angle < 0.1,
                 now < self.z_transition_until,
-                now < self.rotation_transition_until,
+                self.rotation_direction != 0,
+                self.box_position is not None or self.box_held,
             ]
 
     def read_coils(self, address: int, count: int) -> list[bool]:
@@ -80,7 +91,6 @@ class Process:
             self.z_down = False
             self.z_transition_until = 0.0
             self.robot_angle = 0.0
-            self.rotation_transition_until = 0.0
             self.rotation_direction = 0
             self.events.clear()
             self.request_counts = [0] * len(self.request_counts)
@@ -151,17 +161,15 @@ class Process:
 
             if extend_z != self.z_down:
                 self.z_down = extend_z
-                self.z_transition_until = now + 0.35
+                self.z_transition_until = now + PICKER_Z_TRANSITION_SECONDS
                 self._record_event(f"Picker Z axis {'extending' if extend_z else 'retracting'}")
 
             direction = 0
             if rotate_cw and not rotate_ccw and self.robot_angle < 1.0:
-                self.robot_angle = min(1.0, self.robot_angle + dt / 0.8)
-                self.rotation_transition_until = now + 0.15
+                self.robot_angle = min(1.0, self.robot_angle + dt / PICKER_ROTATION_SECONDS)
                 direction = 1
             elif rotate_ccw and not rotate_cw and self.robot_angle > 0.0:
-                self.robot_angle = max(0.0, self.robot_angle - dt / 0.8)
-                self.rotation_transition_until = now + 0.15
+                self.robot_angle = max(0.0, self.robot_angle - dt / PICKER_ROTATION_SECONDS)
                 direction = -1
 
             if direction != self.rotation_direction:
@@ -192,7 +200,7 @@ class Process:
 
             if conveyor and self.box_position is not None:
                 previous_position = self.box_position
-                self.box_position += dt * 0.25
+                self.box_position += dt * CONVEYOR_SPEED
                 if previous_position < 1.0 <= self.box_position:
                     self._record_event("Box reached the pickup sensor")
                 if self.box_position > 1.5:
@@ -341,9 +349,11 @@ class ResetHandler(BaseHTTPRequestHandler):
             return
 
         self.server.process.reset()
-        print("Simulator process reset to startup baseline.", flush=True)
         self.send_response(204)
         self.end_headers()
+
+    def log_message(self, _format: str, *_args: object) -> None:
+        del _format, _args
 
 
 class ResetServer(ThreadingHTTPServer):
@@ -361,22 +371,6 @@ def run_simulation(process: Process, tick: float) -> None:
         now = time.monotonic()
         process.step(now, now - last)
         last = now
-
-
-def run_status_reporter(
-    process: Process,
-    status_interval: float,
-    stop_event: threading.Event,
-) -> None:
-    next_status = time.monotonic()
-    while not stop_event.wait(0.25):
-        for event in process.drain_events():
-            print(f"\n[{time.strftime('%H:%M:%S')}] {event}", flush=True)
-
-        now = time.monotonic()
-        if status_interval and now >= next_status:
-            print(f"\n--- Live process status ---\n{process.live_status()}", flush=True)
-            next_status = now + status_interval
 
 
 def run_cli(process: Process) -> None:
@@ -432,12 +426,6 @@ def main() -> None:
         help="loopback-only process reset HTTP port (default: 8081)",
     )
     parser.add_argument("--emitter-interval", type=float, default=5.0, help="seconds between automatic boxes")
-    parser.add_argument(
-        "--status-interval",
-        type=float,
-        default=2.0,
-        help="seconds between live status updates; use 0 to disable (default: 2)",
-    )
     args = parser.parse_args()
     if not 0 <= args.unit_id <= 247:
         parser.error("--unit-id must be between 0 and 247")
@@ -445,36 +433,22 @@ def main() -> None:
         parser.error("--reset-port must be between 1 and 65535")
     if args.emitter_interval <= 0:
         parser.error("--emitter-interval must be positive")
-    if args.status_interval < 0:
-        parser.error("--status-interval must not be negative")
-
     process = Process(unit_id=args.unit_id, emitter_interval=args.emitter_interval)
     server = ModbusServer((args.host, args.port), process)
     reset_server = ResetServer(("127.0.0.1", args.reset_port), process)
     print(
         f"Modbus/TCP listening on {args.host}:{args.port}, unit ID {args.unit_id}. "
-        f"Local reset endpoint on 127.0.0.1:{args.reset_port}. "
-        "Configure OpenPLC to read 6 discrete inputs and write 5 coils.\n"
-        "Live process updates are enabled; use 'help' for simulator commands."
+        f"Local reset endpoint on 127.0.0.1:{args.reset_port}."
     )
-    stop_reporter = threading.Event()
     threading.Thread(target=server.serve_forever, daemon=True).start()
     threading.Thread(target=run_simulation, args=(process, 0.05), daemon=True).start()
     reset_thread = threading.Thread(target=reset_server.serve_forever, daemon=True)
     reset_thread.start()
-    reporter = threading.Thread(
-        target=run_status_reporter,
-        args=(process, args.status_interval, stop_reporter),
-        daemon=True,
-    )
-    reporter.start()
     try:
         run_cli(process)
     except KeyboardInterrupt:
         print()
     finally:
-        stop_reporter.set()
-        reporter.join(timeout=1)
         server.shutdown()
         server.server_close()
         reset_server.shutdown()

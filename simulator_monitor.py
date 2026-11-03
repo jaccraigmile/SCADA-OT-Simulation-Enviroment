@@ -20,6 +20,7 @@ INPUTS = (
     "RobotDetected",
     "MovingZ",
     "Rotating",
+    "BoxPresent",
 )
 COILS = ("Conveyor", "Grab", "ExtendZ", "RotateCW", "RotateCCW")
 
@@ -135,8 +136,10 @@ HMI_PAGE = """<!doctype html>
             <rect x="565" y="60" width="120" height="32" rx="5" class="machine"/>
             <text x="590" y="48" class="small-label">PICKER</text>
             <g id="armGroup">
-              <line x1="625" y1="92" x2="625" y2="168" class="arm"/>
-              <path d="M625 168 L607 185 M625 168 L643 185" class="gripper"/>
+              <line id="armBeam" x1="0" y1="0" x2="0" y2="76" class="arm"/>
+              <g id="gripper" transform="translate(0 76)">
+                <path d="M0 0 L-18 17 M0 0 L18 17" class="gripper"/>
+              </g>
             </g>
             <text x="710" y="100" class="small-label">Arm pose is inferred from output coils</text>
           </svg>
@@ -156,12 +159,13 @@ HMI_PAGE = """<!doctype html>
     </div>
   </main>
   <script>
-    const inputNames = ["StartButton", "SafetyDoorClosed", "BoxAtSensor", "RobotDetected", "MovingZ", "Rotating"];
+    const inputNames = ["StartButton", "SafetyDoorClosed", "BoxAtSensor", "RobotDetected", "MovingZ", "Rotating", "BoxPresent"];
     const coilNames = ["Conveyor", "Grab", "ExtendZ", "RotateCW", "RotateCCW"];
     const inputLabels = {
       StartButton: "Start button", SafetyDoorClosed: "Safety door closed",
       BoxAtSensor: "Box at pickup", RobotDetected: "Picker detects box",
-      MovingZ: "Picker Z moving", Rotating: "Picker rotating"
+      MovingZ: "Picker Z moving", Rotating: "Picker rotating",
+      BoxPresent: "Box in process"
     };
     const coilLabels = {
       Conveyor: "Conveyor", Grab: "Gripper", ExtendZ: "Extend Z",
@@ -236,22 +240,36 @@ HMI_PAGE = """<!doctype html>
       lastFrame = now;
       const data = lastData;
       if (data) {
-        const moving = data.coils.Conveyor && !data.inputs.BoxAtSensor && !data.coils.Grab;
-        if (moving) boxX = Math.min(610, boxX + 105 * dt);
+        const moving = data.coils.Conveyor && data.inputs.BoxPresent &&
+          !data.inputs.BoxAtSensor && !data.coils.Grab;
+        if (moving) boxX = Math.min(590, boxX + 67.5 * dt);
         if (data.inputs.BoxAtSensor) boxX = 590;
-        if (data.coils.RotateCW) armAngle = Math.min(90, armAngle + 110 * dt);
-        if (data.coils.RotateCCW) armAngle = Math.max(0, armAngle - 110 * dt);
-        const hasBox = data.inputs.BoxAtSensor || data.inputs.RobotDetected || data.coils.Grab || moving;
+        if (!data.inputs.BoxPresent && !data.inputs.RobotDetected && !data.coils.Grab) boxX = 140;
+        if (data.coils.RotateCW) armAngle = Math.min(90, armAngle + 56.25 * dt);
+        if (data.coils.RotateCCW) armAngle = Math.max(0, armAngle - 56.25 * dt);
+        const hasBox = data.inputs.BoxPresent || data.inputs.RobotDetected || data.coils.Grab;
         const box = document.getElementById("box");
         const held = data.coils.Grab && !data.inputs.BoxAtSensor;
+        const heldX = 605 + (armAngle / 90) * 210;
+        const heldY = data.coils.ExtendZ ? 150 : 220;
         box.style.display = hasBox ? "block" : "none";
-        box.setAttribute("x", held ? 605 + (armAngle / 90) * 210 : boxX);
-        box.setAttribute("y", held && data.coils.ExtendZ ? 150 : 220);
+        box.setAttribute("x", held ? heldX : boxX);
+        box.setAttribute("y", held && data.coils.ExtendZ ? heldY : 220);
         document.getElementById("dropBox").style.display =
           armAngle >= 88 && !data.coils.Grab ? "block" : "none";
-        const extended = data.coils.ExtendZ ? 40 : 0;
+        const armX = held ? heldX + 19 : 625 + (armAngle / 90) * 224;
+        const armY = held ? heldY + 19 :
+          data.coils.ExtendZ || data.inputs.RobotDetected ? 239 : 168;
+        const armDx = armX - 625;
+        const armDy = armY - 92;
+        const armLength = Math.hypot(armDx, armDy);
+        const armAngleDegrees = -Math.atan2(armDx, armDy) * 180 / Math.PI;
+        document.getElementById("armBeam").setAttribute("y2", armLength);
+        document.getElementById("gripper").setAttribute(
+          "transform", "translate(0 " + armLength + ")"
+        );
         document.getElementById("armGroup").setAttribute(
-          "transform", "translate(0 " + extended + ") rotate(" + armAngle + " 625 92)"
+          "transform", "translate(625 92) rotate(" + armAngleDegrees + ")"
         );
         if (now - lastUpdate > 2500) {
           document.getElementById("connection").textContent = "STALE DATA";
@@ -261,7 +279,7 @@ HMI_PAGE = """<!doctype html>
       requestAnimationFrame(animate);
     }
     refresh();
-    setInterval(refresh, 250);
+    setInterval(refresh, 100);
     requestAnimationFrame(animate);
   </script>
 </body>

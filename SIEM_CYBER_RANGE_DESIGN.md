@@ -32,11 +32,12 @@ The existing lab already provides a useful OT pilot:
 - `simulator_monitor.py` serves a read-only browser HMI and polls Modbus input
   and coil states.
 
-Current observability is limited. The simulator prints process events and
-request counts to its terminal; the Python controller prints state and output
-changes; the HMI polls only the current discrete inputs and coils. The
-simulator does not currently export structured audit events to a SIEM, and
-its Modbus map does not expose exact box position or picker angle. Treat
+Current observability is limited. The simulator retains process events and
+Modbus request counts internally, but does not print them automatically or
+export structured audit events to a SIEM. Its interactive `status` command
+can display a snapshot on request; the Python controller prints state and
+output changes, and the HMI polls only current discrete inputs and coils.
+The Modbus map does not expose exact box position or picker angle. Treat
 structured simulator logging and network sensor deployment as future
 integration work, not as capabilities already present.
 

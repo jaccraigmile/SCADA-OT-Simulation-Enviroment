@@ -74,6 +74,7 @@ process state:
 | Discrete input | 3 | RobotDetected |
 | Discrete input | 4 | MovingZ |
 | Discrete input | 5 | Rotating |
+| Discrete input | 6 | BoxPresent |
 | Coil | 0 | Conveyor |
 | Coil | 1 | Grab |
 | Coil | 2 | ExtendZ |
@@ -130,7 +131,7 @@ authorized source is the assigned Kali guest; the only target is
 1. Pause the selected controller and leave the simulator and capture
    running. This prevents the controller from immediately overwriting a
    student test value.
-2. From Kali, use the lab's Modbus client to read the six discrete inputs
+2. From Kali, use the lab's Modbus client to read the seven discrete inputs
    starting at address `0`. Confirm the response against the HMI.
 3. Use the assigned non-safety coil from the I/O map and issue one write
    changing its state. Capture the request and response; record the source,
