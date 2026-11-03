@@ -244,6 +244,18 @@ def _exception_response(function: int, code: int) -> bytes:
     return bytes((function | 0x80, code))
 
 
+def _log_multiple_coil_write(address: int, values: list[bool]) -> None:
+    outputs = ", ".join(
+        f"{COIL_NAMES[address + offset]}={'ON' if value else 'OFF'}"
+        for offset, value in enumerate(values)
+    )
+    print(
+        f"Received FC 15 write: address={address}, count={len(values)}; "
+        f"outputs: {outputs}",
+        flush=True,
+    )
+
+
 def process_pdu(process: Process, pdu: bytes) -> bytes:
     if not pdu:
         return b""
@@ -296,6 +308,7 @@ def process_pdu(process: Process, pdu: bytes) -> bytes:
             for index in range(count)
         ]
         process.write_coils(address, values)
+        _log_multiple_coil_write(address, values)
         return bytes((function,)) + struct.pack(">HH", address, count)
 
     return _exception_response(function, 1)
