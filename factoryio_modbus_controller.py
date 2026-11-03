@@ -21,6 +21,7 @@ INPUT_NAMES = (
 COIL_NAMES = ("Conveyor", "Grab", "ExtendZ", "RotateCW", "RotateCCW")
 INPUT_COUNT = len(INPUT_NAMES)
 COIL_COUNT = len(COIL_NAMES)
+DEFAULT_MODBUS_PORT = 502
 
 
 def receive_exactly(connection: socket.socket, length: int) -> bytes:
@@ -113,18 +114,25 @@ class ModbusTCPClient:
     def read_inputs(self) -> list[bool]:
         return self.read_bits(2, INPUT_COUNT)
 
-    def write_coil(self, address: int, value: bool) -> None:
-        if not 0 <= address < COIL_COUNT:
-            raise ValueError(f"coil address out of range: {address}")
-        encoded_value = 0xFF00 if value else 0x0000
-        request = struct.pack(">BHH", 5, address, encoded_value)
+    def write_coils(self, values: list[bool]) -> None:
+        if len(values) != COIL_COUNT:
+            raise ValueError(f"expected {COIL_COUNT} coil values")
+        byte_count = (len(values) + 7) // 8
+        packed_values = bytearray(byte_count)
+        for index, value in enumerate(values):
+            if value:
+                packed_values[index // 8] |= 1 << (index % 8)
+        request = (
+            struct.pack(">BHHB", 15, 0, len(values), byte_count)
+            + packed_values
+        )
         response = self._exchange(request)
-        if response != request:
-            raise ValueError("invalid FC 5 write response")
+        expected_response = struct.pack(">BHH", 15, 0, len(values))
+        if response != expected_response:
+            raise ValueError("invalid FC 15 write response")
 
     def write_all_coils_off(self) -> None:
-        for address in range(COIL_COUNT):
-            self.write_coil(address, False)
+        self.write_coils([False] * COIL_COUNT)
 
 
 @dataclass
@@ -149,16 +157,20 @@ class Controller:
     def log(self, message: str) -> None:
         print(f"[{time.strftime('%H:%M:%S')}] {message}", flush=True)
 
-    def set_coil(self, address: int, value: bool) -> None:
-        assert self.coil_states is not None
-        if self.coil_states[address] != value:
-            self.client.write_coil(address, value)
-            self.coil_states[address] = value
-            self.log(f"Output {COIL_NAMES[address]} -> {'ON' if value else 'OFF'}")
-
     def set_outputs(self, values: list[bool]) -> None:
-        for address, value in enumerate(values):
-            self.set_coil(address, value)
+        assert self.coil_states is not None
+        if self.coil_states != values:
+            previous = self.coil_states.copy()
+            self.client.write_coils(values)
+            self.coil_states = values.copy()
+            for address, (old_value, value) in enumerate(
+                zip(previous, values)
+            ):
+                if old_value != value:
+                    self.log(
+                        f"Output {COIL_NAMES[address]} -> "
+                        f"{'ON' if value else 'OFF'}"
+                    )
 
     def reset_for_safety(self) -> None:
         self.set_outputs([False] * COIL_COUNT)
@@ -289,7 +301,12 @@ class Controller:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--host", default="10.77.20.10", help="simulator IP address")
-    parser.add_argument("--port", type=int, default=1502, help="Modbus/TCP port")
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=DEFAULT_MODBUS_PORT,
+        help=f"Modbus/TCP port (default: {DEFAULT_MODBUS_PORT})",
+    )
     parser.add_argument("--unit-id", type=int, default=1, help="Modbus unit ID")
     parser.add_argument("--poll-interval", type=float, default=0.05, help="seconds between scans")
     parser.add_argument("--status-interval", type=float, default=2.0, help="seconds between status lines; 0 disables")
