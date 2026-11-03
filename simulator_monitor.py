@@ -297,6 +297,13 @@ def receive_exactly(connection: socket.socket, length: int) -> bytes:
     return bytes(data)
 
 
+class ModbusExceptionError(ValueError):
+    def __init__(self, function: int, code: int) -> None:
+        self.function = function
+        self.code = code
+        super().__init__(f"Modbus exception code {code}")
+
+
 def read_bits(
     connection: socket.socket,
     transaction_id: int,
@@ -320,7 +327,9 @@ def read_bits(
         raise ValueError("empty Modbus response")
     if response_pdu[0] == function | 0x80:
         exception_code = response_pdu[1] if len(response_pdu) > 1 else "unknown"
-        raise ValueError(f"Modbus exception code {exception_code}")
+        if not isinstance(exception_code, int):
+            raise ValueError(f"Modbus exception code {exception_code}")
+        raise ModbusExceptionError(function, exception_code)
     expected_bytes = (count + 7) // 8
     if (
         len(response_pdu) != expected_bytes + 2
@@ -338,11 +347,26 @@ def read_bits(
 def read_snapshot(
     connection: socket.socket, transaction_id: int, unit_id: int
 ) -> tuple[dict[str, bool], dict[str, bool], int]:
-    inputs = read_bits(connection, transaction_id, unit_id, 2, len(INPUTS))
+    legacy_input_map = False
+    try:
+        input_values = read_bits(connection, transaction_id, unit_id, 2, len(INPUTS))
+    except ModbusExceptionError as error:
+        if error.function != 2 or error.code != 2:
+            raise
+        legacy_input_map = True
+        input_values = read_bits(connection, transaction_id, unit_id, 2, len(INPUTS) - 1)
     transaction_id = (transaction_id + 1) & 0xFFFF
     coils = read_bits(connection, transaction_id, unit_id, 1, len(COILS))
     transaction_id = (transaction_id + 1) & 0xFFFF
-    return dict(zip(INPUTS, inputs, strict=True)), dict(zip(COILS, coils, strict=True)), transaction_id
+    if legacy_input_map:
+        input_values.append(
+            input_values[2] or input_values[3] or coils[0] or coils[1]
+        )
+    return (
+        dict(zip(INPUTS, input_values, strict=True)),
+        dict(zip(COILS, coils, strict=True)),
+        transaction_id,
+    )
 
 
 class HMIState:
