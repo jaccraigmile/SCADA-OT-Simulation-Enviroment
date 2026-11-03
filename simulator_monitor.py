@@ -23,6 +23,7 @@ INPUTS = (
     "BoxPresent",
 )
 COILS = ("Conveyor", "Grab", "ExtendZ", "RotateCW", "RotateCCW")
+DEFAULT_MODBUS_PORT = 502
 
 HMI_PAGE = """<!doctype html>
 <html lang="en">
@@ -504,7 +505,12 @@ class HMIServer(ThreadingHTTPServer):
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--host", default="10.77.20.10", help="simulator IP address")
-    parser.add_argument("--port", type=int, default=1502, help="Modbus/TCP port")
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=DEFAULT_MODBUS_PORT,
+        help=f"Modbus/TCP port (default: {DEFAULT_MODBUS_PORT})",
+    )
     parser.add_argument("--unit-id", type=int, default=1, help="Modbus unit ID")
     parser.add_argument(
         "--interval",
