@@ -59,7 +59,10 @@ class Process:
                 now < self.start_button_until,
                 self.door_closed,
                 self.box_position is not None and self.box_position >= 1.0,
-                self.z_down and self.box_position is not None and self.robot_angle < 0.1,
+                self.z_down
+                and self.box_position is not None
+                and self.box_position >= 1.0
+                and self.robot_angle < 0.1,
                 now < self.z_transition_until,
                 self.rotation_direction != 0,
                 self.box_position is not None or self.box_held,
@@ -149,7 +152,7 @@ class Process:
 
     def step(self, now: float, dt: float) -> None:
         with self.lock:
-            if self.auto_emitter and self.box_position is None:
+            if self.auto_emitter and self.box_position is None and not self.box_held:
                 if now - self.last_emission >= self.emitter_interval:
                     self.box_position = 0.0
                     self.last_emission = now
