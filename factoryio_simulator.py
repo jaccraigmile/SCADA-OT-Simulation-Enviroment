@@ -328,34 +328,34 @@ def process_pdu(
 class ModbusHandler(socketserver.BaseRequestHandler):
     def handle(self) -> None:
         client_host, client_port = self.client_address[:2]
-        print(
-            f"Modbus client connected: {client_host}:{client_port}",
-            flush=True,
-        )
+#        print(
+#            f"Modbus client connected: {client_host}:{client_port}",
+#            flush=True,
+#        )
         try:
             while True:
                 header = self._receive_exactly(6)
-                print(
-                    "HEADER:",
-                    header.hex() if header else None,
-                    flush=True
-                )
+#                print(
+#                    "HEADER:",
+#                    header.hex() if header else None,
+#                    flush=True
+#                )
                 if header is None:
                     return
                 transaction, protocol, length = struct.unpack(">HHH", header)
-                print(
-                    f"TXN={transaction} "
-                    f"PROTO={protocol} "
-                    f"LEN={length}",
-                    f"HEADER={header.hex()}",
-                    flush=True
-                )
+#                print(
+#                    f"TXN={transaction} "
+#                    f"PROTO={protocol} "
+#                    f"LEN={length}",
+#                   f"HEADER={header.hex()}",
+#                    flush=True
+#                )
                 if protocol != 0 or length < 2 or length > 254:
                     return
                 body = self._receive_exactly(length)
                 if body is None:
                     return
-                print(f"PDU={body.hex()}", flush=True)
+#                print(f"PDU={body.hex()}", flush=True)
                 unit_id, pdu = body[0], body[1:]
                 response_pdu = (
                     process_pdu(self.server.process, pdu, transaction)
@@ -364,10 +364,10 @@ class ModbusHandler(socketserver.BaseRequestHandler):
                 )
                 response_body = bytes((unit_id,)) + response_pdu
                 response_header = struct.pack(">HHH", transaction, 0, len(response_body))
-                print(
-                    f"SENDING RESPONSE TXN={transaction}",
-                    flush=True
-                )
+#                print(
+#                    f"SENDING RESPONSE TXN={transaction}",
+#                    flush=True
+#                )
                 self.request.sendall(response_header + response_body)
         finally:
             print(
