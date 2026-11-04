@@ -72,7 +72,7 @@ while flag:
 
 if OPENPLC_WRITE_COILS_QUERY is None:
     raise RuntimeError("Failed to locate write coils packet")
-
+print(OPENPLC_WRITE_COILS_QUERY[TCP].flags)
 print("crafting packet")
 tcpddata = {
     'src': OPENPLC_WRITE_COILS_QUERY[IP].src,

@@ -37,7 +37,7 @@ interlocks, physical safety systems, or an operator's safety procedures.
 - Run only on the assigned simulator and isolated lab networks.
 - The lab assignment authorizes the listed activity against the simulator;
   the instructor establishes the starting state and recovery procedure.
-- Use only the assigned Kali guest and simulator at `10.77.20.10:1502`.
+- Use only the assigned Kali guest and simulator at `10.77.20.10:502`.
 - Use only the one non-safety output coil selected for this exercise. Never
   write safety inputs, disable safety logic, or change firewall policy.
 - If the simulator or controller behaves unexpectedly, stop the exercise
@@ -52,7 +52,7 @@ interlocks, physical safety systems, or an operator's safety procedures.
 2. Verify the HMI reports connected and that its live safety-door and output
    indicators agree with the simulator.
 3. Start Wireshark on Kali's PLC-LAB interface and use the display filter
-   `tcp.port == 1502`. Capture on SIM-LAB as well if students will correlate
+   `tcp.port == 502`. Capture on SIM-LAB as well if students will correlate
    the HMI connection.
 4. Select one non-safety output coil for the hands-on test and confirm its
    expected process effect. Provide the coil address and original value to
@@ -66,7 +66,7 @@ interlocks, physical safety systems, or an operator's safety procedures.
 ### Part A — Establish the baseline
 
 1. Students record the selected option, relevant guest addresses, capture
-   interfaces, TCP port `1502`, and current process state.
+   interfaces, TCP port `502`, and current process state.
 2. Observe the normal behavior supported by the selected controller
    configuration. Record controller state, simulator console events, HMI
    inputs/outputs, and Modbus traffic timestamps. The introductory Option A

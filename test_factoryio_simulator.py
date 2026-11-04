@@ -19,11 +19,17 @@ from factoryio_simulator import (
     ResetServer,
     process_pdu,
 )
-from factoryio_modbus_controller import Controller, ModbusTCPClient
+from factoryio_modbus_controller import (
+    DEFAULT_MODBUS_PORT as CONTROLLER_DEFAULT_MODBUS_PORT,
+    Controller,
+    ModbusTCPClient,
+)
 from reset_lab_process import main as reset_lab_process_main
 from simulator_monitor import (
+    DEFAULT_MODBUS_PORT as HMI_DEFAULT_MODBUS_PORT,
     HMIState,
     HMIServer,
+    ModbusExceptionError,
     ModbusPoller,
     make_handler,
     read_snapshot,
@@ -117,6 +123,27 @@ class ModbusProcessTests(unittest.TestCase):
             thread.join(timeout=2)
             server.server_close()
 
+    def test_reset_script_pulses_start_on_local_simulator(self):
+        server = ResetServer(("127.0.0.1", 0), self.process)
+        thread = threading.Thread(target=server.serve_forever)
+        thread.start()
+        try:
+            with patch(
+                "sys.argv",
+                [
+                    "reset_lab_process.py",
+                    "--start",
+                    "--port",
+                    str(server.server_address[1]),
+                ],
+            ), redirect_stdout(StringIO()):
+                reset_lab_process_main()
+            self.assertTrue(self.process.read_inputs()[0])
+        finally:
+            server.shutdown()
+            thread.join(timeout=2)
+            server.server_close()
+
     def test_live_status_shows_process_and_io_names(self):
         status = self.process.live_status()
 
@@ -126,13 +153,25 @@ class ModbusProcessTests(unittest.TestCase):
         self.assertIn("Conveyor=off", status)
 
     def test_writes_multiple_coils(self):
-        response = process_pdu(self.process, b"\x0f\x00\x00\x00\x05\x01\x15")
+        with redirect_stdout(StringIO()) as output:
+            response = process_pdu(
+                self.process, b"\x0f\x00\x00\x00\x05\x01\x15"
+            )
 
         self.assertEqual(response, b"\x0f\x00\x00\x00\x05")
         self.assertEqual(
             self.process.read_coils(0, COIL_COUNT),
             [True, False, True, False, True],
         )
+        self.assertIn(
+            "Received FC 15 write: address=0, count=5; outputs: "
+            "Conveyor=ON, Grab=OFF, ExtendZ=ON, RotateCW=OFF, RotateCCW=ON",
+            output.getvalue(),
+        )
+
+        with redirect_stdout(StringIO()) as repeated_output:
+            process_pdu(self.process, b"\x0f\x00\x00\x00\x05\x01\x15")
+        self.assertIn("Received FC 15 write:", repeated_output.getvalue())
 
     def test_rejects_addresses_outside_tutorial_io_map(self):
         self.assertEqual(
@@ -182,19 +221,22 @@ class ModbusProcessTests(unittest.TestCase):
         server = ModbusServer(("127.0.0.1", 0), self.process)
         thread = threading.Thread(target=server.serve_forever)
         thread.start()
-        try:
-            with socket.create_connection(server.server_address, timeout=2) as client:
-                request = struct.pack(">HHHB", 0x1234, 0, 6, 1)
-                client.sendall(request + b"\x02\x00\x00\x00\x06")
-                response = client.recv(64)
-            self.assertEqual(
-                response,
-                struct.pack(">HHHB", 0x1234, 0, 4, 1) + b"\x02\x01\x02",
-            )
-        finally:
-            server.shutdown()
-            thread.join(timeout=2)
-            server.server_close()
+        with redirect_stdout(StringIO()) as output:
+            try:
+                with socket.create_connection(server.server_address, timeout=2) as client:
+                    request = struct.pack(">HHHB", 0x1234, 0, 6, 1)
+                    client.sendall(request + b"\x02\x00\x00\x00\x06")
+                    response = client.recv(64)
+                self.assertEqual(
+                    response,
+                    struct.pack(">HHHB", 0x1234, 0, 4, 1) + b"\x02\x01\x02",
+                )
+            finally:
+                server.shutdown()
+                thread.join(timeout=2)
+                server.server_close()
+        self.assertIn("Modbus client connected: 127.0.0.1:", output.getvalue())
+        self.assertIn("Modbus client disconnected: 127.0.0.1:", output.getvalue())
 
     def test_python_controller_reads_and_writes_simulator(self):
         server = ModbusServer(("127.0.0.1", 0), self.process)
@@ -207,8 +249,20 @@ class ModbusProcessTests(unittest.TestCase):
                 client.read_inputs(),
                 [False, True, False, False, False, False],
             )
-            client.write_coil(0, True)
-            self.assertEqual(self.process.read_coils(0, 1), [True])
+            with redirect_stdout(StringIO()) as output:
+                client.write_coils([True, False, True, False, True])
+                self.assertIn(
+                    "Received FC 15 write: transaction_id=0x0001; "
+                    "address=0, count=5; outputs: "
+                    "Conveyor=ON, Grab=OFF, ExtendZ=ON, RotateCW=OFF, RotateCCW=ON",
+                    output.getvalue(),
+                )
+            self.assertEqual(
+                self.process.read_coils(0, COIL_COUNT),
+                [True, False, True, False, True],
+            )
+            self.assertEqual(self.process.request_counts[5], 0)
+            self.assertEqual(self.process.request_counts[15], 1)
         finally:
             client.close()
             server.shutdown()
@@ -223,8 +277,8 @@ class ModbusProcessTests(unittest.TestCase):
             def read_inputs(self):
                 return self.inputs
 
-            def write_coil(self, address, value):
-                self.coils[address] = value
+            def write_coils(self, values):
+                self.coils = values.copy()
 
         client = FakeClient()
         controller = Controller(client, poll_interval=0.05, status_interval=0)
@@ -258,6 +312,45 @@ class ModbusProcessTests(unittest.TestCase):
             thread.join(timeout=2)
             server.server_close()
 
+    def test_hmi_supports_legacy_six_input_map(self):
+        connection = object()
+        with patch(
+            "simulator_monitor.read_bits",
+            side_effect=[
+                ModbusExceptionError(2, 2, 0, 7),
+                [False, True, False, False, False, False],
+                [True, False, False, False, False],
+            ],
+        ) as read:
+            inputs, coils, next_transaction_id = read_snapshot(connection, 10, 1)
+
+        self.assertEqual(
+            inputs,
+            {
+                "StartButton": False,
+                "SafetyDoorClosed": True,
+                "BoxAtSensor": False,
+                "RobotDetected": False,
+                "MovingZ": False,
+                "Rotating": False,
+                "BoxPresent": True,
+            },
+        )
+        self.assertTrue(coils["Conveyor"])
+        self.assertEqual(next_transaction_id, 13)
+        self.assertEqual(
+            [call.args[1:] for call in read.call_args_list],
+            [(10, 1, 2, 7), (11, 1, 2, 6), (12, 1, 1, 5)],
+        )
+
+    def test_hmi_error_identifies_failing_modbus_request(self):
+        error = ModbusExceptionError(1, 2, 0, 5)
+
+        self.assertEqual(
+            str(error),
+            "Modbus FC 1 read at address 0, count 5: exception code 2",
+        )
+
     def test_hmi_serves_dashboard_and_json_status(self):
         state = HMIState()
         state.update(
@@ -285,6 +378,13 @@ class ModbusProcessTests(unittest.TestCase):
                 )
                 self.assertIn('setAttribute("y2", armLength)', page)
                 self.assertIn('heldX + 19', page)
+                self.assertIn(
+                    "lastData.coils.Grab &&\n"
+                    "        !data.coils.Grab &&\n"
+                    "        armAngle >= 88",
+                    page,
+                )
+                self.assertIn("boxX = 140;", page)
             with urlopen(base_url + "/api/status", timeout=2) as response:
                 payload = json.loads(response.read())
             self.assertTrue(payload["connected"])
@@ -331,6 +431,8 @@ class ModbusProcessTests(unittest.TestCase):
 
     def test_factory_io_default_modbus_port(self):
         self.assertEqual(DEFAULT_MODBUS_PORT, 502)
+        self.assertEqual(CONTROLLER_DEFAULT_MODBUS_PORT, DEFAULT_MODBUS_PORT)
+        self.assertEqual(HMI_DEFAULT_MODBUS_PORT, DEFAULT_MODBUS_PORT)
 
 
 if __name__ == "__main__":

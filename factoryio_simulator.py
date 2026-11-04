@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import signal
 import socketserver
 import struct
 import threading
@@ -244,19 +245,29 @@ def _exception_response(function: int, code: int) -> bytes:
     return bytes((function | 0x80, code))
 
 
-def _log_multiple_coil_write(address: int, values: list[bool]) -> None:
+def _log_multiple_coil_write(
+    address: int, values: list[bool], transaction_id: int | None
+) -> None:
     outputs = ", ".join(
         f"{COIL_NAMES[address + offset]}={'ON' if value else 'OFF'}"
         for offset, value in enumerate(values)
     )
+    transaction = (
+        f" transaction_id=0x{transaction_id:04x};"
+        if transaction_id is not None
+        else ""
+    )
     print(
-        f"Received FC 15 write: address={address}, count={len(values)}; "
+        f"Received FC 15 write:{transaction} address={address}, "
+        f"count={len(values)}; "
         f"outputs: {outputs}",
         flush=True,
     )
 
 
-def process_pdu(process: Process, pdu: bytes) -> bytes:
+def process_pdu(
+    process: Process, pdu: bytes, transaction_id: int | None = None
+) -> bytes:
     if not pdu:
         return b""
 
@@ -308,7 +319,7 @@ def process_pdu(process: Process, pdu: bytes) -> bytes:
             for index in range(count)
         ]
         process.write_coils(address, values)
-        _log_multiple_coil_write(address, values)
+        _log_multiple_coil_write(address, values, transaction_id)
         return bytes((function,)) + struct.pack(">HH", address, count)
 
     return _exception_response(function, 1)
@@ -316,25 +327,53 @@ def process_pdu(process: Process, pdu: bytes) -> bytes:
 
 class ModbusHandler(socketserver.BaseRequestHandler):
     def handle(self) -> None:
-        while True:
-            header = self._receive_exactly(6)
-            if header is None:
-                return
-            transaction, protocol, length = struct.unpack(">HHH", header)
-            if protocol != 0 or length < 2 or length > 254:
-                return
-            body = self._receive_exactly(length)
-            if body is None:
-                return
-            unit_id, pdu = body[0], body[1:]
-            response_pdu = (
-                process_pdu(self.server.process, pdu)
-                if unit_id == self.server.process.unit_id
-                else _exception_response(pdu[0] if pdu else 0, 11)
+        client_host, client_port = self.client_address[:2]
+        print(
+            f"Modbus client connected: {client_host}:{client_port}",
+            flush=True,
+        )
+        try:
+            while True:
+                header = self._receive_exactly(6)
+                print(
+                    "HEADER:",
+                    header.hex() if header else None,
+                    flush=True
+                )
+                if header is None:
+                    return
+                transaction, protocol, length = struct.unpack(">HHH", header)
+                print(
+                    f"TXN={transaction} "
+                    f"PROTO={protocol} "
+                    f"LEN={length}",
+                    f"HEADER={header.hex()}",
+                    flush=True
+                )
+                if protocol != 0 or length < 2 or length > 254:
+                    return
+                body = self._receive_exactly(length)
+                if body is None:
+                    return
+                print(f"PDU={body.hex()}", flush=True)
+                unit_id, pdu = body[0], body[1:]
+                response_pdu = (
+                    process_pdu(self.server.process, pdu, transaction)
+                    if unit_id == self.server.process.unit_id
+                    else _exception_response(pdu[0] if pdu else 0, 11)
+                )
+                response_body = bytes((unit_id,)) + response_pdu
+                response_header = struct.pack(">HHH", transaction, 0, len(response_body))
+                print(
+                    f"SENDING RESPONSE TXN={transaction}",
+                    flush=True
+                )
+                self.request.sendall(response_header + response_body)
+        finally:
+            print(
+                f"Modbus client disconnected: {client_host}:{client_port}",
+                flush=True,
             )
-            response_body = bytes((unit_id,)) + response_pdu
-            response_header = struct.pack(">HHH", transaction, 0, len(response_body))
-            self.request.sendall(response_header + response_body)
 
     def _receive_exactly(self, count: int) -> bytes | None:
         data = bytearray()
@@ -356,12 +395,23 @@ class ModbusServer(socketserver.ThreadingTCPServer):
 
 
 class ResetHandler(BaseHTTPRequestHandler):
-    def do_POST(self) -> None:
-        if self.path != "/reset":
+    def do_GET(self) -> None:
+        if self.path != "/health":
             self.send_error(404)
             return
 
-        self.server.process.reset()
+        self.send_response(204)
+        self.end_headers()
+
+    def do_POST(self) -> None:
+        if self.path == "/start":
+            self.server.process.set_start_button()
+        elif self.path == "/reset":
+            self.server.process.reset()
+        else:
+            self.send_error(404)
+            return
+
         self.send_response(204)
         self.end_headers()
 
@@ -438,6 +488,11 @@ def main() -> None:
         default=8081,
         help="loopback-only process reset HTTP port (default: 8081)",
     )
+    parser.add_argument(
+        "--headless",
+        action="store_true",
+        help="run without the interactive terminal command prompt",
+    )
     parser.add_argument("--emitter-interval", type=float, default=5.0, help="seconds between automatic boxes")
     args = parser.parse_args()
     if not 0 <= args.unit_id <= 247:
@@ -457,8 +512,13 @@ def main() -> None:
     threading.Thread(target=run_simulation, args=(process, 0.05), daemon=True).start()
     reset_thread = threading.Thread(target=reset_server.serve_forever, daemon=True)
     reset_thread.start()
+    stop_event = threading.Event()
+    signal.signal(signal.SIGTERM, lambda _signum, _frame: stop_event.set())
     try:
-        run_cli(process)
+        if args.headless:
+            stop_event.wait()
+        else:
+            run_cli(process)
     except KeyboardInterrupt:
         print()
     finally:

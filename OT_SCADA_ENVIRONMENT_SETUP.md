@@ -54,6 +54,29 @@ ip -br address
 ip route
 ```
 
+### Optional 100 ms egress delay on Kali `eth1`
+
+This lab setup uses a 100 ms egress delay on Kali's `eth1` interface. Apply it
+after confirming that `eth1` is the intended lab interface:
+
+```bash
+sudo tc qdisc replace dev eth1 root netem delay 100ms
+```
+
+Verify the active queueing discipline:
+
+```bash
+tc qdisc show dev eth1
+```
+
+This delays packets leaving `eth1`; it affects all egress traffic on that
+interface, not only Modbus. The setting is temporary and must be reapplied
+after a reboot. To remove it:
+
+```bash
+sudo tc qdisc del dev eth1 root
+```
+
 Kali's default route must use its internet uplink. Enable IPv4 forwarding for
 the current boot:
 
@@ -91,7 +114,7 @@ table inet plc_lab_filter {
         iifname $PLC_IF oifname $WAN_IF ip saddr 10.77.10.0/24 counter accept
         iifname $SIM_IF oifname $WAN_IF ip saddr 10.77.20.0/24 counter accept
 
-        iifname $PLC_IF oifname $SIM_IF ip saddr 10.77.10.10 ip daddr 10.77.20.10 tcp dport 1502 ct state new,established counter accept
+        iifname $PLC_IF oifname $SIM_IF ip saddr 10.77.10.10 ip daddr 10.77.20.10 tcp dport 502 ct state new,established counter accept
     }
 }
 
@@ -149,7 +172,7 @@ sudo nft -f /etc/nftables.d/plc-lab.nft
 
 These are example rules, not a complete firewall policy. The forwarding
 chain permits established return traffic, controller and simulator outbound
-internet traffic, and the controller-to-simulator TCP `1502` flow. Its
+internet traffic, and the controller-to-simulator TCP `502` flow. Its
 default-drop policy blocks other forwarded traffic, including new
 internet-to-lab connections. Do not expose guest management services or
 enable unrestricted forwarding. The HMI connects locally from Kali's SIM-LAB
@@ -188,23 +211,23 @@ views.
 Start a capture on Kali before starting either controller:
 
 ```bash
-sudo tcpdump -ni any 'host 10.77.10.10 and host 10.77.20.10 and tcp port 1502'
+sudo tcpdump -ni any 'host 10.77.10.10 and host 10.77.20.10 and tcp port 502'
 ```
 
 Alternatively, open Wireshark on Kali, capture on its lab interfaces, and use
 this display filter:
 
 ```text
-tcp.port == 1502
+tcp.port == 502
 ```
 
-If Wireshark does not decode port `1502` as Modbus/TCP automatically, select a
+If Wireshark does not decode port `502` as Modbus/TCP automatically, select a
 packet and use **Analyze > Decode As** to decode that TCP port as Modbus/TCP.
 
 Start the browser-based HMI on Kali in another terminal:
 
 ```bash
-python3 simulator_monitor.py --host 10.77.20.10 --port 1502 --unit-id 1
+python3 simulator_monitor.py --host 10.77.20.10 --port 502 --unit-id 1
 ```
 
 On Kali, open `http://127.0.0.1:8080/`. The page shows the simulated
@@ -222,7 +245,7 @@ addresses) and permit TCP `8080` only from that workstation:
 
 ```bash
 HMI_BIND_IP="actual-kali-interface-address"
-python3 simulator_monitor.py --host 10.77.20.10 --port 1502 --unit-id 1 --web-host "$HMI_BIND_IP"
+python3 simulator_monitor.py --host 10.77.20.10 --port 502 --unit-id 1 --web-host "$HMI_BIND_IP"
 ```
 
 Set `HMI_BIND_IP` to the Kali interface IP reachable from the authorized
@@ -235,18 +258,25 @@ On the simulator guest, install Python 3, copy or clone this repository, then
 run from the repository directory:
 
 ```bash
-python3 factoryio_simulator.py --host 0.0.0.0 --port 1502 --unit-id 1
+python3 factoryio_simulator.py --host 0.0.0.0 --port 502 --unit-id 1
 ```
 
 Use Python 3.10 or newer for the simulator and HMI. The simulator also starts
 a process-reset HTTP endpoint bound only to `127.0.0.1:8081`; it is not
-reachable through the lab network.
+reachable through the lab network. TCP port `502` is privileged on Linux;
+grant the simulator service only the `CAP_NET_BIND_SERVICE` capability using
+the container or service manager, rather than running the program as root.
 
 Keep the process running. Its prompt accepts `status`, `start`, `box`,
 `door open`, `door close`, `auto on`, `auto off`, and `reset`. For this setup,
 leave automatic box emission enabled. A box appears after about five seconds.
-The simulator does not print periodic process summaries or event messages.
+The simulator does not print periodic process summaries or general process
+events. It prints each valid FC 15 request with the named output states.
 Enter `status` at the `sim>` prompt to request a current process snapshot.
+When updating an existing simulator container, replace its
+`factoryio_simulator.py` with the updated project copy and restart the
+simulator process; editing the workstation copy does not update a running
+container.
 
 ### Reset the simulator process
 
@@ -272,7 +302,7 @@ controller, restore a VM snapshot, or change Kali, firewall, or Proxmox
 network settings. Confirm the HMI shows the reset state, then start the
 selected controller when ready.
 
-Permit inbound TCP port `1502` to the simulator from the controller at
+Permit inbound TCP port `502` to the simulator from the controller at
 `10.77.10.10` (forwarded through Kali) and the HMI host at
 `10.77.20.1` in any guest or Proxmox firewall that applies.
 
@@ -451,7 +481,7 @@ and deploy the program before setting up the Remote Device:
    the Edge Device to be online and reachable; do not expose its management
    interface to the lab VNets just to make discovery work.
 4. Once connected, build and upload from the Control VM. The Runtime then
-   makes the Modbus connection to `10.77.20.10:1502` through Kali.
+   makes the Modbus connection to `10.77.20.10:502` through Kali.
 
 The exact management service/port depends on how Runtime v4 was deployed.
 Allow the ports required by that deployment between the Control VM and
@@ -470,7 +500,7 @@ The result should show next hop `10.77.10.1` on the PLC-LAB interface. Then
 test the Modbus TCP port:
 
 ```bash
-nc -vz -w 3 10.77.20.10 1502
+nc -vz -w 3 10.77.20.10 502
 ```
 
 Expect a successful TCP connection. At the same time, Kali's capture should
@@ -486,7 +516,7 @@ In the new editor, create a **Remote Device**, not a Modbus Server:
    `+` > **Remote Device** > **Modbus**. Name it `FactoryIOSimulator` and
    create it.
 2. Set **Transport** to `TCP/IP`, **IP Address** to `10.77.20.10`,
-   **Port** to `1502`, **Slave ID** to `1`, and **Timeout (ms)** to `1000`.
+   **Port** to `502`, **Slave ID** to `1`, and **Timeout (ms)** to `1000`.
 3. Add a read group:
 
    | Field | Value |
@@ -628,44 +658,136 @@ controller-to-simulator interface or bypass route.
 
 1. Create a Debian/Ubuntu LXC named `python-controller` and attach its NIC to
    `PLC-LAB`. Configure `10.77.10.10/24` with default gateway `10.77.10.1`.
-2. Install Python 3.10 or newer in the controller LXC. Copy
-   `factoryio_modbus_controller.py` from this repository into it. The
-   controller uses only the Python standard library.
-3. Keep the simulator running at `10.77.20.10:1502`, unit ID `1`, as in the
-   common simulator setup.
-4. On Kali, allow TCP `1502` from the controller through to the simulator and
+2. Install Python 3.10 or newer and `openssh-server` in both containers.
+   Create an unprivileged `otlab` account in each, enable SSH, and prepare
+   the application directory:
+
+   ```bash
+   sudo apt-get update
+   sudo apt-get install -y python3 openssh-server
+   sudo useradd --create-home --shell /bin/bash otlab
+   sudo passwd otlab
+   sudo install -d -o otlab -g otlab /opt/factoryio
+   sudo systemctl enable --now ssh
+   ```
+
+   Copy the project files to `/opt/factoryio` in the relevant container,
+   owned by `otlab`: `factoryio_simulator.py` in the simulator LXC and
+   `reset_lab_process.py` in the simulator LXC, and
+   `factoryio_modbus_controller.py` in the controller LXC. Stop any copies
+   currently running in terminals before moving to the service-managed setup.
+3. Install the matching service unit from this repository:
+
+   - Simulator LXC: copy `systemd/factoryio-simulator.service` to
+     `/etc/systemd/system/factoryio-simulator.service`.
+   - Controller LXC: copy `systemd/factoryio-controller.service` to
+     `/etc/systemd/system/factoryio-controller.service`.
+
+   Then run `sudo systemctl daemon-reload` in each container. The simulator
+   unit runs as `otlab` and receives only `CAP_NET_BIND_SERVICE` to bind TCP
+   `502`. The controller unit handles SIGINT on stop so it can turn its coils
+   off before exiting.
+4. Configure SSH access from Kali to `otlab@10.77.20.10` and
+   `otlab@10.77.10.10` using a dedicated public key. Keep the private key on
+   Kali. Restrict SSH ingress on the simulator to Kali's SIM-LAB address
+   `10.77.20.1`, and on the controller to Kali's PLC-LAB address
+   `10.77.10.1`. On Kali, create the key and display its public half:
+
+   ```bash
+   ssh-keygen -t ed25519 -f ~/.ssh/factoryio-optionb
+   cat ~/.ssh/factoryio-optionb.pub
+   ```
+
+   From each container's Proxmox console, create the authorized-keys file,
+   paste the complete public-key line, and press Ctrl+D:
+
+   ```bash
+   sudo install -d -o otlab -g otlab -m 0700 /home/otlab/.ssh
+   sudo tee /home/otlab/.ssh/authorized_keys >/dev/null
+   ```
+
+   Then set ownership and permissions:
+
+   ```bash
+   sudo chown otlab:otlab /home/otlab/.ssh/authorized_keys
+   sudo chmod 0600 /home/otlab/.ssh/authorized_keys
+   ```
+
+   In each container, add a sudoers drop-in with
+   `sudo visudo -f /etc/sudoers.d/otlab-factoryio` allowing `otlab` to run
+   only these service-management commands without a password:
+
+   ```sudoers
+   otlab ALL=(root) NOPASSWD: /usr/bin/systemctl start factoryio-simulator.service, /usr/bin/systemctl stop factoryio-simulator.service, /usr/bin/systemctl restart factoryio-simulator.service, /usr/bin/systemctl is-active factoryio-simulator.service
+   ```
+
+   Use `factoryio-controller.service` instead of
+   `factoryio-simulator.service` in the controller container's rule. Validate
+   the file with `sudo visudo -cf /etc/sudoers.d/otlab-factoryio`.
+5. On Kali, copy `start_option_b_from_kali.sh` from this repository and make
+   it executable with `chmod +x start_option_b_from_kali.sh`. Test both
+   targets with the dedicated key:
+
+   ```bash
+   ssh -i ~/.ssh/factoryio-optionb otlab@10.77.10.10 true
+   ssh -i ~/.ssh/factoryio-optionb otlab@10.77.20.10 true
+   ```
+
+   Set `SSH_IDENTITY_FILE=~/.ssh/factoryio-optionb` when invoking the
+   launcher, or load the key into the agent with `ssh-add` (required if the
+   private key has a passphrase). On first connection, verify the SSH host
+   keys interactively before using the launcher's non-interactive SSH calls.
+6. Keep the simulator at `10.77.20.10:502`, unit ID `1`. From Kali, start,
+   inspect, and stop the Option B services with:
+
+   ```bash
+   SSH_IDENTITY_FILE=~/.ssh/factoryio-optionb ./start_option_b_from_kali.sh start
+   SSH_IDENTITY_FILE=~/.ssh/factoryio-optionb ./start_option_b_from_kali.sh status
+   SSH_IDENTITY_FILE=~/.ssh/factoryio-optionb ./start_option_b_from_kali.sh stop
+   ```
+
+   The `start` command starts the simulator and controller, then pulses the
+   simulator's StartButton through its loopback-only control endpoint.
+   `restart` does the same after restarting both services. The script stops
+   the controller before the simulator. It changes no VNet, route, or Modbus
+   forwarding settings. SSH is for service and process-start control; the
+   Modbus data flow remains `10.77.10.10` through Kali to `10.77.20.10`.
+7. On Kali, allow TCP `502` from the controller through to the simulator and
    established return traffic. The common Kali gateway section has the
    example forwarding rule; use Kali's `PLC-LAB` and `SIM-LAB` interface
    names. Capture with:
 
    ```bash
-   sudo tcpdump -ni any 'host 10.77.10.10 and host 10.77.20.10 and tcp port 1502'
+   sudo tcpdump -ni any 'host 10.77.10.10 and host 10.77.20.10 and tcp port 502'
    ```
 
-5. From the controller LXC, verify the route and TCP reachability:
+8. From the controller LXC, verify the route and TCP reachability:
 
    ```bash
    ip route get 10.77.20.10
-   nc -vz -w 3 10.77.20.10 1502
+   nc -vz -w 3 10.77.20.10 502
    ```
 
    The route must go through `10.77.10.1` and the TCP connection must succeed.
-6. Start the direct controller:
+9. The controller can also be started manually in the controller LXC instead
+   of through the Kali launcher:
 
    ```bash
-   python3 factoryio_modbus_controller.py --host 10.77.20.10 --port 1502 --unit-id 1
+   python3 factoryio_modbus_controller.py --host 10.77.20.10 --port 502 --unit-id 1
    ```
 
-   It polls the first six discrete inputs with FC 2, writes coils with FC 5, and
-   prints its state and output changes. It starts in `WAIT_START`; at the
-   simulator's `sim>` prompt, enter `start` to pulse `StartButton` and begin
-   the conveyor/pick/place/return sequence. Enter `door open` to stop outputs
-   and reset the sequence; close the door and issue `start` again to resume.
+   It polls the first six discrete inputs with FC 2, writes all five coils
+   together with FC 15, and prints its state and output changes. It starts in
+   `WAIT_START`. If the simulator is running interactively, enter `start` at
+   its `sim>` prompt to pulse `StartButton`; when using the systemd services,
+   use the Kali launcher, which starts both services and pulses the button.
+   Enter `door open` at an interactive simulator prompt to stop outputs and
+   reset the sequence; close the door and issue `start` again to resume.
    Press Ctrl+C in the controller terminal to stop it; on normal shutdown it
    attempts to turn all five coils off.
-7. Open the HMI at `http://127.0.0.1:8080/` in Kali's browser. The
+10. Open the HMI at `http://127.0.0.1:8080/` in Kali's browser. The
    display shows live process signals and approximate motion, while Wireshark
-   shows the controller's FC 2 requests and FC 5 coil writes. The HMI's own
+   shows the controller's FC 2 requests and FC 15 coil writes. The HMI's own
    FC 2 and FC 1 polling is a separate connection sourced from Kali at `10.77.20.1`.
    The Modbus exchange itself is direct controller-to-simulator over the
    routed Kali path; Kali is not acting as an active Modbus proxy.
@@ -676,6 +798,11 @@ the Editor.
 
 #### Option B troubleshooting
 
+- **Kali launcher cannot connect:** Verify SSH host keys, public-key
+  authentication, SSH ingress from Kali's lab-side addresses, and the
+  container-specific `otlab` sudoers rule. Check service logs in the
+  container with `sudo journalctl -u factoryio-simulator.service` or
+  `sudo journalctl -u factoryio-controller.service`.
 - **Python controller cannot start:** Check Python 3.10+, simulator host/port,
   Slave ID `1`, and that the simulator is running. The controller exits with
   an error if its Modbus connection or response fails.
@@ -685,9 +812,9 @@ the Editor.
 - **No packets on Kali:** On the PLC guest, check `ip route get 10.77.20.10`.
   If the next hop is not Kali's `10.77.10.1`, the Modbus flow bypasses Kali.
 - **Route works but TCP test fails:** Check that the simulator is listening on
-  `0.0.0.0:1502`, the simulator IP is correct, and forwarding/firewall rules
+  `0.0.0.0:502`, the simulator IP is correct, and forwarding/firewall rules
   permit the flow.
-- **HMI shows disconnected:** Verify the simulator accepts TCP `1502` from
+- **HMI shows disconnected:** Verify the simulator accepts TCP `502` from
   Kali's `10.77.20.1` address, and check the HMI command's simulator IP, port,
   and unit ID. The HMI retries after connection errors.
 - **Lab guest has no internet access:** Check its default gateway is the Kali
@@ -696,8 +823,8 @@ the Editor.
   Kali's egress. Also verify the guest's DNS configuration.
 - **TCP connects but Modbus errors:** Check Slave ID `1`, FC 2 input range
   offset `0` length `6`, and FC 5 coil offsets `0` through `4`.
-- **No traffic appears on port 502:** This lab intentionally uses `1502`.
-  The simulator and Remote Device must use the same port.
+- **No traffic appears on port 502:** Verify the simulator and Remote Device
+  both use TCP `502`, and that Kali's forwarding rule permits that port.
 
 
 

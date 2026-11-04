@@ -19,10 +19,11 @@ by the current code.
 
 | Component | Role |
 | --- | --- |
-| [factoryio_simulator.py](./factoryio_simulator.py) | Headless process model and Modbus/TCP server. Models the conveyor, box, picker, safety-door input, and five output coils; process status is shown on request at the simulator prompt. |
+| [factoryio_simulator.py](./factoryio_simulator.py) | Headless process model and Modbus/TCP server. Models the conveyor, box, picker, safety-door input, and five output coils; prints every valid FC 15 write with named output states, while process status is shown on request at the simulator prompt. |
 | [factoryio_modbus_controller.py](./factoryio_modbus_controller.py) | Optional standalone Python Modbus/TCP client/controller. Runs a pick-and-place sequence without OpenPLC. |
+| [start_option_b_from_kali.sh](./start_option_b_from_kali.sh) | Starts, stops, restarts, or checks the Option B simulator and controller services remotely from Kali over SSH. |
 | [simulator_monitor.py](./simulator_monitor.py) | Browser-based, read-only HMI. Polls simulator inputs/coils and displays process signals and inferred motion. |
-| [reset_lab_process.py](./reset_lab_process.py) | Resets the running simulator's process state to its startup baseline through a loopback-only endpoint. |
+| [reset_lab_process.py](./reset_lab_process.py) | Starts or resets the simulator process through its loopback-only control endpoint. |
 | [test_factoryio_simulator.py](./test_factoryio_simulator.py) | Unit and integration tests for the simulator, controller communication, HMI, and reset behavior. |
 
 See the [Python programs guide](./PYTHON_PROGRAMS_GUIDE.md) for explanations
@@ -38,15 +39,16 @@ HTTP data flow, run commands, and test coverage.
 | [ADVANCED_LAB_01_OT_DETECTION_ENGINEERING.md](./ADVANCED_LAB_01_OT_DETECTION_ENGINEERING.md) | Wireshark baselining and Modbus/TCP dissection, a live simulator client test, and detection development. |
 | [ADVANCED_LAB_02_OT_INCIDENT_RESPONSE.md](./ADVANCED_LAB_02_OT_INCIDENT_RESPONSE.md) | Live, bounded output-change exercise, packet/process correlation, incident timeline, and recovery. |
 | [ADVANCED_LAB_03_OT_SEGMENTATION_VALIDATION.md](./ADVANCED_LAB_03_OT_SEGMENTATION_VALIDATION.md) | TCP/Modbus session analysis, approved path tests, and segmentation/containment validation. |
+| [ADVANCED_LAB_04_MODBUS_TCP_SESSION_ANALYSIS_SCAPY.md](./ADVANCED_LAB_04_MODBUS_TCP_SESSION_ANALYSIS_SCAPY.md) | Kali-based Wireshark and offline Scapy analysis of Modbus/TCP session state; no forged packet transmission. |
 | [SIEM_CYBER_RANGE_DESIGN.md](./SIEM_CYBER_RANGE_DESIGN.md) | Proposal for future SIEM integration, OT telemetry, and a segmented virtual-company cyber range. |
 
 ## Architecture at a glance
 
-The simulator and selected controller communicate using Modbus/TCP on port
-`1502`, unit ID `1`. Proxmox SDN keeps the process simulator and controller
-on separate isolated networks; Kali routes and captures the traffic. Kali
-also provides the lab's NATed internet egress. The lab guests are not
-connected directly to the internet-facing bridge.
+The simulator and selected controller communicate using Modbus/TCP on the
+standard port `502`, unit ID `1`. Proxmox SDN keeps the process simulator and
+controller on separate isolated networks; Kali routes and captures the
+traffic. Kali also provides the lab's NATed internet egress. The lab guests
+are not connected directly to the internet-facing bridge.
 
 Choose one controller path for a run:
 
@@ -79,7 +81,8 @@ easy to observe in the HMI.
 
 Addresses are zero-based. Discrete inputs are read with function code 02;
 coils are read with FC 01 and can be written with FC 05 or FC 15. The
-introductory OpenPLC configuration uses FC 05 for coil writes.
+introductory OpenPLC configuration uses FC 05; the Python controller uses
+FC 15 to write all five outputs together.
 
 | Address | Modbus area | Signal | Meaning |
 | ---: | --- | --- | --- |
@@ -109,7 +112,7 @@ The simulator and HMI use only the Python standard library. On the simulator
 guest, from the project directory:
 
 ```bash
-python3 factoryio_simulator.py --host 0.0.0.0 --port 1502 --unit-id 1
+python3 factoryio_simulator.py --host 0.0.0.0 --port 502 --unit-id 1
 ```
 
 The prompt accepts `status`, `start`, `box`, `door open`, `door close`,

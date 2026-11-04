@@ -57,7 +57,7 @@ different IP plan.
   `10.77.0.10` on `MGMT`, only on ports required by the deployed Runtime
   v4 workflow.
 - Runtime data interface `10.77.10.10` initiates Modbus/TCP to simulator
-  `10.77.20.10:1502` through Kali.
+  `10.77.20.10:502` through Kali.
 - Kali HMI polls the simulator locally from Kali's SIM-LAB address
   `10.77.20.1`.
 - The Control VM does not need a direct Modbus path to the simulator.
@@ -65,7 +65,7 @@ different IP plan.
 ### Option B — Python Modbus/TCP controller
 
 - Controller `10.77.10.10` initiates Modbus/TCP to simulator
-  `10.77.20.10:1502` through Kali.
+  `10.77.20.10:502` through Kali.
 - Kali HMI polls the simulator locally from `10.77.20.1`.
 - There is no OpenPLC Runtime, Editor Control VM, or MGMT network for this
   option.
@@ -91,9 +91,9 @@ cases:
 
 | Test case | Expected result |
 | --- | --- |
-| Selected controller to simulator on TCP `1502` | Allowed through the designated gateway; capture confirms the routed path. |
+| Selected controller to simulator on TCP `502` | Allowed through the designated gateway; capture confirms the routed path. |
 | Established simulator reply to the controller | Allowed as return traffic for the permitted flow. |
-| Kali HMI to simulator on TCP `1502` | Allowed locally on SIM-LAB; distinguish this connection from controller traffic. |
+| Kali HMI to simulator on TCP `502` | Allowed locally on SIM-LAB; distinguish this connection from controller traffic. |
 | Unrelated guest to simulator Modbus service | Denied unless explicitly authorized by the instructor. |
 | Simulator initiating a new connection to the controller | Denied unless a documented lab requirement says otherwise. |
 | New connection from the internet uplink to a lab guest | Denied. |
@@ -107,11 +107,11 @@ applicable** rather than inventing an endpoint.
 
 1. Use the test endpoints in the matrix and the selected topology. The
    authorized source is the assigned Kali guest; the simulator endpoint is
-   `10.77.20.10:1502`. Keep each check within the listed source, destination,
+   `10.77.20.10:502`. Keep each check within the listed source, destination,
    and port.
 2. On Kali, start Wireshark on the interface through which the test path
-   should pass. Apply `tcp.port == 1502`. If needed, use **Analyze > Decode
-   As** to decode port `1502` as Modbus/TCP.
+   should pass. Apply `tcp.port == 502`. If needed, use **Analyze > Decode
+   As** to decode port `502` as Modbus/TCP.
 3. Confirm the normal controller-to-simulator connection with the
    environment setup guide's route and TCP reachability checks.
 4. From the designated test guest, check only the assigned simulator address

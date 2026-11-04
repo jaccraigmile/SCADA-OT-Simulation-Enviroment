@@ -9,7 +9,7 @@ distinguishable from normal controller and HMI traffic.
 
 This lab follows the workflow in the
 [Wireshark Modbus/TCP tutorial](https://rodrigocantera.com/en/dissecting-openplc-modbus-tcp-communications-with-wireshark/),
-using the lab's port `1502` rather than the common Modbus port `502`.
+using standard Modbus/TCP port `502`.
 
 ## Learning objectives
 
@@ -43,7 +43,7 @@ files and the simulator/controller console output.
 This isolated lab is intentionally provided for students to perform the
 hands-on tests below against the live simulator. The course assignment
 authorizes activity only from the assigned Kali guest to
-`10.77.20.10:1502`. The simulator has no Modbus authentication and traffic is
+`10.77.20.10:502`. The simulator has no Modbus authentication and traffic is
 unencrypted. Do not target any other host, port, network, or physical OT
 system. Limit writes to the assigned non-safety coil and restore its original
 state before resuming the controller.
@@ -51,7 +51,7 @@ state before resuming the controller.
 ## Preparation
 
 1. Select one controller option; do not run both controllers simultaneously.
-2. Verify the controller reaches `10.77.20.10:1502` through Kali and confirm
+2. Verify the controller reaches `10.77.20.10:502` through Kali and confirm
    the simulator and HMI are working.
 3. Synchronize guest clocks to the instructor-controlled time source.
 4. Record the selected option, guest IPs, TCP port, unit ID, capture
@@ -87,22 +87,22 @@ process state:
 2. Start the controller and let the normal process run. In Wireshark, apply:
 
    ```text
-   tcp.port == 1502
+   tcp.port == 502
    ```
 
    To isolate the controller path:
 
    ```text
-   ip.addr == 10.77.10.10 && ip.addr == 10.77.20.10 && tcp.port == 1502
+   ip.addr == 10.77.10.10 && ip.addr == 10.77.20.10 && tcp.port == 502
    ```
 
    To isolate the HMI path:
 
    ```text
-   ip.addr == 10.77.20.1 && ip.addr == 10.77.20.10 && tcp.port == 1502
+   ip.addr == 10.77.20.1 && ip.addr == 10.77.20.10 && tcp.port == 502
    ```
 
-3. If Wireshark does not decode port `1502` as Modbus/TCP, select a packet
+3. If Wireshark does not decode port `502` as Modbus/TCP, select a packet
    and choose **Analyze > Decode As**, then decode that TCP port as Modbus/TCP.
 4. Select a controller request and expand the TCP and Modbus/TCP details.
    Record the TCP stream, client/server addresses, MBAP transaction
@@ -111,9 +111,8 @@ process state:
    and verify that the Modbus response matches the request's transaction
    identifier.
 5. Identify which requests use FC 2 (read discrete inputs), FC 5 (write one
-   coil), and, if present in the selected capture, FC 15 (write multiple
-   coils). The editor configuration in the introductory Option A uses FC 5;
-   do not assume every controller sends FC 15.
+   coil), and FC 15 (write multiple coils). The introductory Option A uses
+   FC 5, while the Python controller in Option B uses FC 15.
 6. Compare the observed input values with the HMI and simulator console.
    Record the normal client address and polling pattern. The HMI is a
    separate client from Kali (`10.77.20.1`), not part of the controller's
@@ -126,7 +125,7 @@ process state:
 
 Students now actively test the live simulator in the isolated lab. The
 authorized source is the assigned Kali guest; the only target is
-`10.77.20.10` on TCP `1502`.
+`10.77.20.10` on TCP `502`.
 
 1. Pause the selected controller and leave the simulator and capture
    running. This prevents the controller from immediately overwriting a
@@ -154,7 +153,7 @@ Candidates include:
 | New Modbus client | Source/destination pair, TCP port, capture interface | Does the HMI's Kali-originated connection create an expected additional client? |
 | Unexpected Modbus destination | Destination address/port and allowed-flow matrix | Is the traffic on the routed controller path or another lab service? |
 | Change in polling behavior | Request frequency, function code, response status | What is normal for the selected controller and HMI, and what variation is benign? |
-| Failed or malformed protocol exchange | TCP resets, Modbus exception responses, parser events | Can the sensor decode the non-default port `1502` reliably? |
+| Failed or malformed protocol exchange | TCP resets, Modbus exception responses, parser events | Does the sensor decode standard port `502` reliably? |
 | Process-state transition | Simulator console event and HMI discrete inputs/coils | Which signals are visible, and which details the Modbus map does not expose? |
 
 Use a detection worksheet with: rule name, purpose, data source, expected
