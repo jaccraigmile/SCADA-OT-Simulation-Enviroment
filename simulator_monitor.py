@@ -194,15 +194,35 @@ HMI_PAGE = """<!doctype html>
 
     let boxX = 140;
     let armAngle = 0;
+    let zLevel = 0;
+    let zFrom = 0;
+    let zTarget = 0;
+    let zStartedAt = performance.now();
+    const zTransitionMs = 750;
     let lastFrame = performance.now();
     let lastData = null;
     let lastUpdate = 0;
+    function currentZLevel(now) {
+      const progress = Math.min((now - zStartedAt) / zTransitionMs, 1);
+      const easedProgress = 1 - Math.pow(1 - progress, 3);
+      zLevel = zFrom + (zTarget - zFrom) * easedProgress;
+      return zLevel;
+    }
     function setSignal(name, active, isSafety = false) {
       const element = document.getElementById("signal-" + name);
       element.textContent = active ? "ON" : "OFF";
       element.className = "state " + (isSafety && !active ? "fault" : active ? "on" : "off");
     }
     function applyStatus(data) {
+      const now = performance.now();
+      const rotatingWithBox =
+        (data.coils.RotateCW || data.coils.RotateCCW) && data.coils.Grab;
+      const nextZTarget = rotatingWithBox ? 0 : data.coils.ExtendZ ? 1 : 0;
+      if (!lastData || zTarget !== nextZTarget) {
+        zFrom = currentZLevel(now);
+        zTarget = nextZTarget;
+        zStartedAt = now;
+      }
       if (
         lastData &&
         lastData.coils.Grab &&
@@ -221,9 +241,15 @@ HMI_PAGE = """<!doctype html>
       door.className = "badge safety" + (isClosed ? "" : " open");
       document.getElementById("conveyorMotion").textContent =
         data.coils.Conveyor ? "RUNNING" : "STOPPED";
-      const picker = data.coils.RotateCW ? "ROTATING TO DROP" :
-        data.coils.RotateCCW ? "RETURNING" : data.coils.ExtendZ ? "EXTENDING" :
-        data.inputs.MovingZ ? "MOVING Z" : data.coils.Grab ? "HOLDING" : "IDLE";
+      const picker = data.inputs.MovingZ ||
+        (rotatingWithBox && zLevel > 0.05) ?
+        zTarget ? "LOWERING TO PICK" :
+          data.coils.Grab ? "RETRACTING WITH BOX" : "RETRACTING" :
+        rotatingWithBox && armAngle >= 65 && armAngle < 88 ? "LOWERING AT DROP" :
+        data.coils.Grab && armAngle >= 88 ? "POSITIONED OVER DROP" :
+        data.coils.RotateCW ? "ROTATING TO DROP" :
+        data.coils.RotateCCW ? "RETURNING" :
+        data.coils.ExtendZ ? "LOWERED" : data.coils.Grab ? "HOLDING" : "IDLE";
       document.getElementById("pickerMotion").textContent = picker;
       const connection = document.getElementById("connection");
       connection.textContent = data.connected ? "LIVE" : "RECONNECTING";
@@ -259,17 +285,19 @@ HMI_PAGE = """<!doctype html>
         if (data.coils.RotateCCW) armAngle = Math.max(0, armAngle - 56.25 * dt);
         const hasBox = data.inputs.BoxPresent || data.inputs.RobotDetected || data.coils.Grab;
         const box = document.getElementById("box");
-        const held = data.coils.Grab && !data.inputs.BoxAtSensor;
-        const heldX = 605 + (armAngle / 90) * 210;
-        const heldY = data.coils.ExtendZ ? 150 : 220;
+        const held = data.coils.Grab;
+        const heldX = 605 + (armAngle / 90) * 226;
+        const zLevel = currentZLevel(now);
+        const dropLowering = held && armAngle >= 65 ?
+          Math.min((armAngle - 65) / 25, 1) : 0;
+        const heldY = 150 + 70 * Math.max(zLevel, dropLowering);
         box.style.display = hasBox ? "block" : "none";
         box.setAttribute("x", held ? heldX : boxX);
-        box.setAttribute("y", held && data.coils.ExtendZ ? heldY : 220);
+        box.setAttribute("y", held ? heldY : 220);
         document.getElementById("dropBox").style.display =
           armAngle >= 88 && !data.coils.Grab ? "block" : "none";
         const armX = held ? heldX + 19 : 625 + (armAngle / 90) * 224;
-        const armY = held ? heldY + 19 :
-          data.coils.ExtendZ || data.inputs.RobotDetected ? 239 : 168;
+        const armY = held ? heldY + 19 : 168 + 71 * zLevel;
         const armDx = armX - 625;
         const armDy = armY - 92;
         const armLength = Math.hypot(armDx, armDy);
