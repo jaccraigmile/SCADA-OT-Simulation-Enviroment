@@ -45,8 +45,6 @@ case "$action" in
     start)
         run_remote "$simulator_target" factoryio-simulator.service start
         run_remote "$controller_target" factoryio-controller.service start
-        ssh "${ssh_options[@]}" "$simulator_target" \
-            "python3 /opt/factoryio/reset_lab_process.py --start"
         ;;
     stop)
         run_remote "$controller_target" factoryio-controller.service stop
@@ -56,8 +54,6 @@ case "$action" in
         run_remote "$controller_target" factoryio-controller.service stop
         run_remote "$simulator_target" factoryio-simulator.service restart
         run_remote "$controller_target" factoryio-controller.service start
-        ssh "${ssh_options[@]}" "$simulator_target" \
-            "python3 /opt/factoryio/reset_lab_process.py --start"
         ;;
     status)
         status=0

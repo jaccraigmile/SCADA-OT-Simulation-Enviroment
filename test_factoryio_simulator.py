@@ -7,7 +7,8 @@ import threading
 import time
 import unittest
 from unittest.mock import patch
-from urllib.request import urlopen
+from urllib.error import HTTPError
+from urllib.request import Request, urlopen
 
 
 from factoryio_simulator import (
@@ -24,6 +25,7 @@ from factoryio_simulator import (
 from factoryio_modbus_controller import (
     DEFAULT_MODBUS_PORT as CONTROLLER_DEFAULT_MODBUS_PORT,
     Controller,
+    ControllerControlServer,
     ModbusTCPClient,
 )
 from reset_lab_process import main as reset_lab_process_main
@@ -36,6 +38,10 @@ from simulator_monitor import (
     make_handler,
     read_input_registers,
     read_snapshot,
+)
+from optionb_control_hmi import (
+    OperatorHMIServer,
+    make_handler as make_operator_handler,
 )
 
 
@@ -341,7 +347,7 @@ class ModbusProcessTests(unittest.TestCase):
 
     def test_python_controller_starts_and_stops_on_safety_door(self):
         class FakeClient:
-            inputs = [True, True, False, False, False, False]
+            inputs = [False, True, False, False, False, False]
             coils = [False] * 5
 
             def read_inputs(self):
@@ -352,17 +358,149 @@ class ModbusProcessTests(unittest.TestCase):
 
         client = FakeClient()
         controller = Controller(client, poll_interval=0.05, status_interval=0)
+        client.inputs[0] = True
+        with redirect_stdout(StringIO()):
+            controller.scan(0.5)
+        self.assertEqual(controller.state, "STOPPED")
+        self.assertFalse(any(client.coils))
+        client.inputs[0] = False
+        self.assertTrue(controller.request_start())
         with redirect_stdout(StringIO()):
             controller.scan(1.0)
         self.assertEqual(controller.state, "FEED")
         self.assertTrue(client.coils[0])
 
+        controller.request_stop()
+        with redirect_stdout(StringIO()):
+            controller.scan(1.5)
+        self.assertEqual(controller.state, "STOPPED")
+        self.assertFalse(any(client.coils))
+
         client.inputs = [False, False, False, False, False, False]
         with redirect_stdout(StringIO()):
             controller.scan(2.0)
-        self.assertEqual(controller.state, "WAIT_START")
+        self.assertEqual(controller.state, "SAFETY_STOP")
         self.assertFalse(controller.run_enabled)
         self.assertEqual(client.coils, [False] * 5)
+        self.assertFalse(controller.request_start())
+
+    def test_controller_control_api_and_operator_hmi(self):
+        class FakeClient:
+            inputs = [False, True, False, False, False, False]
+            coils = [False] * 5
+
+            def read_inputs(self):
+                return self.inputs
+
+            def write_coils(self, values):
+                self.coils = values.copy()
+
+        controller = Controller(FakeClient(), 0.05, 0)
+        controller.last_inputs = controller.client.read_inputs()
+        control_server = ControllerControlServer(
+            ("127.0.0.1", 0), controller, "test-secret"
+        )
+        control_thread = threading.Thread(target=control_server.serve_forever)
+        control_thread.start()
+        modbus_server = ModbusServer(("127.0.0.1", 0), self.process)
+        modbus_thread = threading.Thread(target=modbus_server.serve_forever)
+        modbus_thread.start()
+        hmi_server = OperatorHMIServer(
+            ("127.0.0.1", 0),
+            make_operator_handler(
+                modbus_server.server_address[0],
+                modbus_server.server_address[1],
+                1,
+                1,
+                f"http://127.0.0.1:{control_server.server_address[1]}",
+                "test-secret",
+            ),
+        )
+        hmi_thread = threading.Thread(target=hmi_server.serve_forever)
+        hmi_thread.start()
+        base_url = f"http://127.0.0.1:{hmi_server.server_address[1]}"
+        try:
+            with urlopen(base_url + "/", timeout=2) as response:
+                page = response.read().decode("utf-8")
+            self.assertIn("Start production", page)
+            self.assertIn("FillValve", page)
+            self.assertNotIn("test-secret", page)
+
+            cross_origin = Request(
+                base_url + "/api/controller/start",
+                data=b"",
+                headers={"Origin": "http://attacker.invalid"},
+                method="POST",
+            )
+            with self.assertRaises(HTTPError) as forbidden:
+                urlopen(cross_origin, timeout=2)
+            self.assertEqual(forbidden.exception.code, 403)
+
+            with self.assertRaises(HTTPError) as unauthorized:
+                urlopen(
+                    f"http://127.0.0.1:{control_server.server_address[1]}/api/status",
+                    timeout=2,
+                )
+            self.assertEqual(unauthorized.exception.code, 401)
+
+            with urlopen(base_url + "/api/status", timeout=2) as response:
+                status = json.loads(response.read())
+            self.assertEqual(status["process"]["process"]["TankLevelPct"], 25.0)
+            self.assertFalse(status["controller"]["run_enabled"])
+
+            start_request = Request(
+                base_url + "/api/controller/start",
+                data=b"",
+                headers={"Origin": base_url},
+                method="POST",
+            )
+            with urlopen(start_request, timeout=2) as response:
+                self.assertTrue(json.loads(response.read())["run_enabled"])
+
+            tank_request = Request(
+                base_url + "/api/tank",
+                data=json.dumps(
+                    {"coil": "FillValve", "enabled": True}
+                ).encode(),
+                headers={
+                    "Content-Type": "application/json",
+                    "Origin": base_url,
+                },
+                method="POST",
+            )
+            with urlopen(tank_request, timeout=2) as response:
+                self.assertTrue(json.loads(response.read())["enabled"])
+            self.assertTrue(self.process.read_coils(5, 1)[0])
+
+            stop_request = Request(
+                base_url + "/api/controller/stop",
+                data=b"",
+                headers={"Origin": base_url},
+                method="POST",
+            )
+            with urlopen(stop_request, timeout=2) as response:
+                self.assertFalse(json.loads(response.read())["run_enabled"])
+
+            controller.last_inputs[1] = False
+            blocked_start = Request(
+                f"http://127.0.0.1:{control_server.server_address[1]}/api/start",
+                data=b"",
+                headers={"Authorization": "Bearer test-secret"},
+                method="POST",
+            )
+            with self.assertRaises(HTTPError) as safety_response:
+                urlopen(blocked_start, timeout=2)
+            self.assertEqual(safety_response.exception.code, 409)
+        finally:
+            hmi_server.shutdown()
+            hmi_thread.join(timeout=2)
+            hmi_server.server_close()
+            modbus_server.shutdown()
+            modbus_thread.join(timeout=2)
+            modbus_server.server_close()
+            control_server.shutdown()
+            control_thread.join(timeout=2)
+            control_server.server_close()
 
     def test_python_controller_retracts_after_pick_with_next_box_at_emitter(self):
         self.process.box_held = True

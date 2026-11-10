@@ -4,10 +4,15 @@
 from __future__ import annotations
 
 import argparse
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import json
+import os
+import secrets
 import socket
 import struct
+import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field as dataclass_field
 
 
 INPUT_NAMES = (
@@ -140,7 +145,7 @@ class Controller:
     client: ModbusTCPClient
     poll_interval: float
     status_interval: float
-    state: str = "WAIT_START"
+    state: str = "STOPPED"
     run_enabled: bool = False
     coil_states: list[bool] | None = None
     motion_seen: bool = False
@@ -148,6 +153,7 @@ class Controller:
     state_started: float = 0.0
     next_status: float = 0.0
     last_inputs: list[bool] | None = None
+    control_lock: threading.RLock = dataclass_field(default_factory=threading.RLock)
 
     def __post_init__(self) -> None:
         if self.coil_states is None:
@@ -158,124 +164,165 @@ class Controller:
         print(f"[{time.strftime('%H:%M:%S')}] {message}", flush=True)
 
     def set_outputs(self, values: list[bool]) -> None:
-        assert self.coil_states is not None
-        if self.coil_states != values:
-            previous = self.coil_states.copy()
-            self.client.write_coils(values)
-            self.coil_states = values.copy()
-            for address, (old_value, value) in enumerate(
-                zip(previous, values)
-            ):
-                if old_value != value:
-                    self.log(
-                        f"Output {COIL_NAMES[address]} -> "
-                        f"{'ON' if value else 'OFF'}"
-                    )
+        with self.control_lock:
+            assert self.coil_states is not None
+            if self.coil_states != values:
+                previous = self.coil_states.copy()
+                self.client.write_coils(values)
+                self.coil_states = values.copy()
+                for address, (old_value, value) in enumerate(
+                    zip(previous, values)
+                ):
+                    if old_value != value:
+                        self.log(
+                            f"Output {COIL_NAMES[address]} -> "
+                            f"{'ON' if value else 'OFF'}"
+                        )
+
+    def request_start(self) -> bool:
+        with self.control_lock:
+            if self.last_inputs is not None and not self.last_inputs[1]:
+                return False
+            if not self.run_enabled:
+                self.run_enabled = True
+                self.state = "FEED"
+                self.motion_seen = False
+                self.robot_detected_seen = False
+                self.log("Operator Start command received; cycle enabled")
+            return True
+
+    def request_stop(self) -> None:
+        with self.control_lock:
+            was_running = self.run_enabled
+            self.run_enabled = False
+            self.state = "STOPPED"
+            self.motion_seen = False
+            self.robot_detected_seen = False
+            if was_running:
+                self.log("Operator Stop command received; outputs disabled")
+
+    def control_status(self) -> dict[str, object]:
+        with self.control_lock:
+            return {
+                "run_enabled": self.run_enabled,
+                "state": self.state,
+                "inputs": (
+                    dict(zip(INPUT_NAMES, self.last_inputs, strict=True))
+                    if self.last_inputs is not None
+                    else None
+                ),
+                "coils": (
+                    dict(zip(COIL_NAMES, self.coil_states, strict=True))
+                    if self.coil_states is not None
+                    else None
+                ),
+            }
 
     def reset_for_safety(self) -> None:
         self.set_outputs([False] * COIL_COUNT)
-        if self.run_enabled or self.state != "WAIT_START":
-            self.log("Safety door open; stopping and waiting for Start")
+        if self.run_enabled or self.state != "SAFETY_STOP":
+            self.log("Safety door open; controller stopped")
         self.run_enabled = False
-        self.state = "WAIT_START"
+        self.state = "SAFETY_STOP"
         self.motion_seen = False
         self.robot_detected_seen = False
 
     def scan(self, now: float) -> None:
-        inputs = self.client.read_inputs()
-        self.last_inputs = inputs
-        start, door_closed, box_at_sensor, robot_detected, moving_z, rotating = inputs
+        with self.control_lock:
+            inputs = self.client.read_inputs()
+            self.last_inputs = inputs
+            _, door_closed, box_at_sensor, robot_detected, moving_z, rotating = inputs
 
-        if not door_closed:
-            self.reset_for_safety()
-            return
+            if not door_closed:
+                self.reset_for_safety()
+                return
 
-        if not self.run_enabled and start:
-            self.run_enabled = True
-            self.state = "FEED"
-            self.log("Start pulse received; cycle enabled")
+            if not self.run_enabled:
+                if self.state not in ("STOPPED", "SAFETY_STOP"):
+                    self.state = "STOPPED"
+                self.set_outputs([False] * COIL_COUNT)
+                return
 
-        outputs = [False] * COIL_COUNT
-        if not self.run_enabled:
-            self.set_outputs(outputs)
-            return
-
-        if self.state == "FEED":
-            if box_at_sensor:
-                self.state = "LOWER"
-                self.log("Box at pickup sensor; lowering picker")
-            else:
-                outputs[0] = True
-
-        elif self.state == "LOWER":
-            outputs[2] = True
-            if robot_detected:
-                self.robot_detected_seen = True
-                outputs[1] = True
-                self.state = "PICK"
-                self.log("Box detected under picker; closing grab")
-
-        elif self.state == "PICK":
-            outputs[1] = True
-            if self.robot_detected_seen and not robot_detected:
-                self.state = "RETRACT"
-                self.motion_seen = False
-                self.log("Box picked; retracting picker")
-            else:
-                outputs[2] = True
-
-        elif self.state == "RETRACT":
-            outputs[1] = True
-            if moving_z:
-                self.motion_seen = True
-            if self.motion_seen and not moving_z:
-                self.state = "ROTATE_TO_DROP"
-                self.motion_seen = False
-                self.log("Picker retracted; rotating toward drop point")
-            else:
-                outputs[2] = False
-
-        elif self.state == "ROTATE_TO_DROP":
-            outputs[1] = True
-            outputs[3] = True
-            if rotating:
-                self.motion_seen = True
-            elif self.motion_seen:
-                self.state = "RELEASE"
-                self.state_started = now
-                self.motion_seen = False
-                self.log("Drop point reached; releasing box")
-
-        elif self.state == "RELEASE":
-            if now - self.state_started >= 0.2:
-                self.state = "ROTATE_TO_PICKUP"
-                self.motion_seen = False
-                self.log("Box released; returning picker")
-
-        elif self.state == "ROTATE_TO_PICKUP":
-            outputs[4] = True
-            if rotating:
-                self.motion_seen = True
-            elif self.motion_seen:
+            outputs = [False] * COIL_COUNT
+            if self.state in ("STOPPED", "SAFETY_STOP"):
                 self.state = "FEED"
-                self.motion_seen = False
-                self.robot_detected_seen = False
-                self.log("Picker returned; ready for next box")
 
-        else:
-            self.log(f"Unknown controller state {self.state}; resetting")
-            self.run_enabled = False
-            self.state = "WAIT_START"
+            if self.state == "FEED":
+                if box_at_sensor:
+                    self.state = "LOWER"
+                    self.log("Box at pickup sensor; lowering picker")
+                else:
+                    outputs[0] = True
 
-        self.set_outputs(outputs)
+            elif self.state == "LOWER":
+                outputs[2] = True
+                if robot_detected:
+                    self.robot_detected_seen = True
+                    outputs[1] = True
+                    self.state = "PICK"
+                    self.log("Box detected under picker; closing grab")
 
-        if self.status_interval and now >= self.next_status:
-            self.log(
-                f"State={self.state} RUN={self.run_enabled} "
-                f"Inputs={dict(zip(INPUT_NAMES, inputs))} "
-                f"Coils={dict(zip(COIL_NAMES, self.coil_states))}"
-            )
-            self.next_status = now + self.status_interval
+            elif self.state == "PICK":
+                outputs[1] = True
+                if self.robot_detected_seen and not robot_detected:
+                    self.state = "RETRACT"
+                    self.motion_seen = False
+                    self.log("Box picked; retracting picker")
+                else:
+                    outputs[2] = True
+
+            elif self.state == "RETRACT":
+                outputs[1] = True
+                if moving_z:
+                    self.motion_seen = True
+                if self.motion_seen and not moving_z:
+                    self.state = "ROTATE_TO_DROP"
+                    self.motion_seen = False
+                    self.log("Picker retracted; rotating toward drop point")
+                else:
+                    outputs[2] = False
+
+            elif self.state == "ROTATE_TO_DROP":
+                outputs[1] = True
+                outputs[3] = True
+                if rotating:
+                    self.motion_seen = True
+                elif self.motion_seen:
+                    self.state = "RELEASE"
+                    self.state_started = now
+                    self.motion_seen = False
+                    self.log("Drop point reached; releasing box")
+
+            elif self.state == "RELEASE":
+                if now - self.state_started >= 0.2:
+                    self.state = "ROTATE_TO_PICKUP"
+                    self.motion_seen = False
+                    self.log("Box released; returning picker")
+
+            elif self.state == "ROTATE_TO_PICKUP":
+                outputs[4] = True
+                if rotating:
+                    self.motion_seen = True
+                elif self.motion_seen:
+                    self.state = "FEED"
+                    self.motion_seen = False
+                    self.robot_detected_seen = False
+                    self.log("Picker returned; ready for next box")
+
+            else:
+                self.log(f"Unknown controller state {self.state}; stopping")
+                self.run_enabled = False
+                self.state = "STOPPED"
+
+            self.set_outputs(outputs)
+
+            if self.status_interval and now >= self.next_status:
+                self.log(
+                    f"State={self.state} RUN={self.run_enabled} "
+                    f"Inputs={dict(zip(INPUT_NAMES, inputs))} "
+                    f"Coils={dict(zip(COIL_NAMES, self.coil_states))}"
+                )
+                self.next_status = now + self.status_interval
 
     def run(self) -> None:
         self.client.connect()
@@ -283,7 +330,7 @@ class Controller:
         self.coil_states = [False] * COIL_COUNT
         self.log(
             f"Connected to simulator at {self.client.host}:{self.client.port}, "
-            f"unit ID {self.client.unit_id}. Waiting for Start pulse."
+            f"unit ID {self.client.unit_id}. Controller stopped until operator Start."
         )
         try:
             while True:
@@ -296,6 +343,71 @@ class Controller:
                 self.client.write_all_coils_off()
             finally:
                 self.client.close()
+
+
+def make_control_handler(
+    controller: Controller, token: str | None
+) -> type[BaseHTTPRequestHandler]:
+    class ControllerControlHandler(BaseHTTPRequestHandler):
+        def _authorized(self) -> bool:
+            if token is None:
+                return True
+            supplied = self.headers.get("Authorization", "")
+            return secrets.compare_digest(supplied, f"Bearer {token}")
+
+        def _respond(self, status: int, payload: dict[str, object]) -> None:
+            content = json.dumps(payload).encode("utf-8")
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(content)))
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.end_headers()
+            self.wfile.write(content)
+
+        def _handle_control(self) -> None:
+            if not self._authorized():
+                self._respond(401, {"error": "unauthorized"})
+                return
+            if self.path == "/api/status" and self.command == "GET":
+                self._respond(200, controller.control_status())
+            elif self.path == "/api/start" and self.command == "POST":
+                if not controller.request_start():
+                    self._respond(
+                        409,
+                        {"error": "Safety door is open; close it before starting."},
+                    )
+                    return
+                self._respond(200, controller.control_status())
+            elif self.path == "/api/stop" and self.command == "POST":
+                controller.request_stop()
+                self._respond(200, controller.control_status())
+            else:
+                self._respond(404, {"error": "not found"})
+
+        def do_GET(self) -> None:
+            self._handle_control()
+
+        def do_POST(self) -> None:
+            self._handle_control()
+
+        def log_message(self, _format: str, *_args: object) -> None:
+            del _format, _args
+
+    return ControllerControlHandler
+
+
+class ControllerControlServer(ThreadingHTTPServer):
+    daemon_threads = True
+    allow_reuse_address = True
+
+    def __init__(
+        self,
+        address: tuple[str, int],
+        controller: Controller,
+        token: str | None,
+    ) -> None:
+        super().__init__(address, make_control_handler(controller, token))
 
 
 def main() -> None:
@@ -311,6 +423,22 @@ def main() -> None:
     parser.add_argument("--poll-interval", type=float, default=0.05, help="seconds between scans")
     parser.add_argument("--status-interval", type=float, default=2.0, help="seconds between status lines; 0 disables")
     parser.add_argument("--timeout", type=float, default=2.0, help="Modbus socket timeout in seconds")
+    parser.add_argument(
+        "--control-host",
+        default="127.0.0.1",
+        help="operator control API bind address (default: loopback only)",
+    )
+    parser.add_argument(
+        "--control-port",
+        type=int,
+        default=8082,
+        help="operator control API port (default: 8082)",
+    )
+    parser.add_argument(
+        "--control-token",
+        default=os.environ.get("FACTORYIO_CONTROL_TOKEN"),
+        help="bearer token for the operator API; may also use FACTORYIO_CONTROL_TOKEN",
+    )
     args = parser.parse_args()
     if not 1 <= args.port <= 65535:
         parser.error("--port must be between 1 and 65535")
@@ -318,6 +446,12 @@ def main() -> None:
         parser.error("--unit-id must be between 0 and 247")
     if args.poll_interval <= 0 or args.timeout <= 0 or args.status_interval < 0:
         parser.error("poll interval and timeout must be positive; status interval must not be negative")
+    if not 1 <= args.control_port <= 65535:
+        parser.error("--control-port must be between 1 and 65535")
+    if args.control_host not in ("127.0.0.1", "::1", "localhost") and not args.control_token:
+        parser.error(
+            "a control token is required when --control-host is not loopback"
+        )
 
     controller = Controller(
         ModbusTCPClient(args.host, args.port, args.unit_id, args.timeout),
@@ -325,11 +459,38 @@ def main() -> None:
         args.status_interval,
     )
     try:
+        control_server = ControllerControlServer(
+            (args.control_host, args.control_port),
+            controller,
+            args.control_token,
+        )
+    except OSError as error:
+        parser.exit(
+            1,
+            f"Cannot start controller control API on "
+            f"{args.control_host}:{args.control_port}: {error}\n",
+        )
+    control_thread = threading.Thread(
+        target=control_server.serve_forever,
+        name="controller-control-api",
+        daemon=True,
+    )
+    control_thread.start()
+    print(
+        f"Controller operator API listening on "
+        f"{args.control_host}:{args.control_port}",
+        flush=True,
+    )
+    try:
         controller.run()
     except KeyboardInterrupt:
         print("\nController stopped.", flush=True)
     except (OSError, ValueError, ConnectionError) as error:
         parser.exit(1, f"Modbus controller failed: {error}\n")
+    finally:
+        control_server.shutdown()
+        control_server.server_close()
+        control_thread.join(timeout=2)
 
 
 if __name__ == "__main__":

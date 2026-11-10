@@ -8,23 +8,27 @@ is required by the current source.
 ## How the programs fit together
 
 ```text
-OpenPLC Runtime (Option A)  OR  Python controller (Option B)
-                   | Modbus/TCP client
-                   v
-          factoryio_simulator.py
-             ^             ^
-             | Modbus/TCP  | loopback-only HTTP reset
-             | read-only   |
-       simulator_monitor.py  reset_lab_process.py
-             |
-        Browser HMI
+                    Control VM (Option B)
+                   /                   \
+      HTTP operator API             Modbus/TCP
+                 |                       |
+        Python controller  ------------> factoryio_simulator.py
+         (Modbus/TCP)                  ^
+                                       |
+                         simulator_monitor.py (read-only)
+
+OpenPLC Runtime (Option A) also communicates with factoryio_simulator.py
+over Modbus/TCP. reset_lab_process.py uses the simulator's loopback-only HTTP
+reset endpoint.
 ```
 
-In the Proxmox environment, the selected controller reaches the simulator
-over routed Modbus/TCP through Kali. The HMI is a separate read-only Modbus
-client. The reset helper sends a local HTTP request to the simulator process;
-it does not communicate through Modbus and does not change the controller,
-firewall, guest networking, or Proxmox configuration.
+In Option B, the Control VM HMI commands controller start/stop over its
+authenticated operator API and reads/writes the simulated process over
+Modbus/TCP. Its tank controls address only tank coils; the controller owns the
+line coils. `simulator_monitor.py` remains a separate read-only HMI. The
+reset helper sends a local HTTP request to the simulator process; it does not
+communicate through Modbus and does not change controller or network
+configuration.
 
 ## `factoryio_simulator.py`
 
@@ -118,10 +122,12 @@ printed. Valid FC 15 output-write requests are printed as they arrive. The
 
 `ResetServer` is a separate HTTP server bound specifically to
 `127.0.0.1`, default port `8081`. Its `GET /health` checks readiness;
-`POST /start` pulses `StartButton`, and `POST /reset` calls `Process.reset()`.
+`POST /start` pulses the legacy `StartButton` input, and `POST /reset` calls
+`Process.reset()`.
 Successful requests return HTTP 204. Because the server binds to loopback, it
 is intended to be called on the simulator guest, not directly across the lab
-network. The Kali Option B launcher invokes the start helper over SSH.
+network. The legacy start pulse does not start the Option B controller; use
+the Control VM operator HMI.
 
 `main()` parses and validates command-line values, creates the process and
 both servers, starts the Modbus server, simulation loop, and reset listener,
@@ -139,7 +145,8 @@ the simulator and performs a pick-and-place sequence without OpenPLC.
 python3 factoryio_modbus_controller.py --host 10.77.20.10 --port 502 --unit-id 1
 ```
 
-It uses only `argparse`, `socket`, `struct`, `time`, and `dataclasses`.
+It uses Python's standard-library networking, HTTP, threading, and JSON
+modules; no third-party package is required.
 
 ### Modbus client
 
@@ -152,9 +159,11 @@ then verifies transaction ID, protocol ID, unit ID, response length, and
 function code. It recognizes Modbus exception responses and closes the
 connection when transport or validation errors occur.
 
-`read_inputs()` uses FC 02 to read the six controller input bits. The HMI
-reads the full process map, including the additional tank signals, and tank
-telemetry via FC 04. `write_coils()` uses FC 15 to send the complete
+`read_inputs()` uses FC 02 to read the six controller input bits. The
+controller starts disabled; the Control VM operator HMI enables or disables
+the production sequence through the controller's HTTP API. The legacy
+`StartButton` discrete input is still readable but does not enable Option B.
+`write_coils()` uses FC 15 to send the complete
 five-coil conveyor/picker output state in one request and validates the
 response address and quantity. `write_all_coils_off()` uses this same FC 15
 operation to establish a known state for the controller-managed outputs on
@@ -165,11 +174,12 @@ changes, keeping the five actuator values synchronized as a single update.
 ### Controller state machine
 
 `Controller.scan()` reads the inputs and computes outputs for each scan. The
-controller uses these states:
+operator API enables the run; the controller uses these states:
 
 | State | Behavior |
 | --- | --- |
-| `WAIT_START` | Outputs stay off until the simulator's start pulse is seen. |
+| `STOPPED` | Outputs stay off until the Control VM operator presses Start. |
+| `SAFETY_STOP` | Outputs stay off after the door opens; close it and press Start to resume. |
 | `FEED` | Conveyor advances a box until `BoxAtSensor` is true. |
 | `LOWER` | Extends the picker; waits for `RobotDetected`. |
 | `PICK` | Closes/holds the gripper and waits for the detection signal to clear. |
@@ -179,13 +189,33 @@ controller uses these states:
 | `ROTATE_TO_PICKUP` | Rotates back and returns to `FEED`. |
 
 If `SafetyDoorClosed` is false, `reset_for_safety()` turns outputs off and
-returns the controller to `WAIT_START`. The code observes a simulated input;
-it is not a certified safety controller.
+sets `SAFETY_STOP`; after the door closes, the operator must press Start
+again. The code observes a simulated input; it is not a certified safety
+controller.
 
 `run()` connects, initializes all coils off, repeatedly scans at the
 configured polling interval, and turns coils off/closes the socket in a
-`finally` block. `main()` validates command-line settings and reports
-connection/protocol failures explicitly.
+`finally` block. `ControllerControlServer` exposes token-authenticated
+`GET /api/status`, `POST /api/start`, and `POST /api/stop` routes. The API
+defaults to loopback; a non-loopback bind requires a bearer token. `main()`
+validates command-line settings and reports connection/protocol failures
+explicitly.
+
+## `optionb_control_hmi.py`
+
+This is the interactive Option B operator station intended for the Control
+VM. It binds to loopback on port `8083`, polls controller/API status and the
+simulator Modbus map, and displays the production state, RTU signals, and tank
+telemetry. Its Start/Stop buttons control the Python controller's run-enable
+state. Tank buttons write only FC 05 coils 5–8; they do not write the
+controller-managed line outputs at addresses 0–4.
+
+The HMI acts as a local web proxy: its server-side requests use a bearer token
+to call the controller API and a separate Modbus/TCP connection for plant
+telemetry and tank coil commands. The token is read from
+`FACTORYIO_CONTROL_TOKEN`; it is never sent to the browser. The HMI is bound
+to loopback by default and rejects non-loopback web binds. It is an operator
+training interface, not a safety-rated controller or physical-process HMI.
 
 ## `simulator_monitor.py`
 
@@ -250,14 +280,18 @@ position is centered over the platform before the gripper releases it.
 
 The standalone controller retains its 50 ms scan interval by default. This is
 the control loop, not display polling; increasing it could delay input and
-safety-door response or miss brief input changes.
+safety-door response or miss brief input changes. The controller starts
+disabled and no longer uses the simulator's legacy `StartButton` input.
+`request_start()` and `request_stop()` are driven by the authenticated
+operator API; opening the safety door disables the run and requires a new
+operator Start after the door is closed.
 
 `make_handler()` creates an HTTP request handler with two GET routes:
 
 - `/` serves the HMI page.
 - `/api/status` returns the current state as JSON.
 
-Other paths return 404. The HMI has no write route and does not control
+Other paths return 404. This remains a read-only display and does not control
 process outputs. `main()` validates options, starts the Modbus poller and
 HTTP server, and stops both cleanly on Ctrl+C.
 
@@ -291,6 +325,8 @@ with automatic box emission disabled. The tests cover:
 - Process motion, safety-door pausing, event output, and reset-to-startup
   state.
 - Modbus/TCP framing and the standalone controller's client/state behavior.
+- Controller operator start/stop behavior and operator HMI controller/tank
+  endpoints.
 - HMI snapshot decoding, HTML/JSON endpoints, and polling-thread updates.
 - The reset helper sending a request to a temporary loopback reset server.
 

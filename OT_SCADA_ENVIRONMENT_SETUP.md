@@ -15,7 +15,7 @@ common to both options. Choose one controller path for a lab run:
 | Option | Controller | What you will do |
 | --- | --- | --- |
 | **Option A — OpenPLC Runtime v4** | OpenPLC Runtime v4 plus a Control VM running the OpenPLC Editor | Configure a Modbus Remote Device, deploy a Structured Text program, and observe how PLC logic reads inputs and controls outputs. |
-| **Option B — Python Modbus/TCP** | A Debian/Ubuntu LXC running `factoryio_modbus_controller.py` | Run a standalone controller that communicates directly with the simulator and executes the pick-and-place sequence. No OpenPLC Runtime or Editor is required. |
+| **Option B — Python Modbus/TCP** | A Debian/Ubuntu controller LXC and a Control VM running the operator HMI | The Control VM starts/stops the Python controller and operates the simulated tank. No OpenPLC Runtime or Editor is required. |
 
 Option A is the PLC-based path and the primary route for learning how an
 industrial controller and its engineering workstation interact in an
@@ -40,9 +40,9 @@ Both options use these shared components:
   hosts the browser-based HMI.
 - Wireshark and the simulator source from this repository.
 
-The same simulator, Kali gateway/capture host, HMI, and Modbus I/O map
-are used in both options. The selected controller is the Modbus client. The
-HMI polls the simulator's inputs and coils read-only.
+The same simulator, Kali gateway/capture host, read-only monitor, and Modbus
+I/O map are used in both options. The selected controller is a Modbus client.
+Option B additionally has an interactive operator HMI on its Control VM.
 
 ## Shared Kali gateway, capture, and HMI setup
 
@@ -114,7 +114,7 @@ table inet plc_lab_filter {
         iifname $PLC_IF oifname $WAN_IF ip saddr 10.77.10.0/24 counter accept
         iifname $SIM_IF oifname $WAN_IF ip saddr 10.77.20.0/24 counter accept
 
-        iifname $PLC_IF oifname $SIM_IF ip saddr 10.77.10.10 ip daddr 10.77.20.10 tcp dport 502 ct state new,established counter accept
+        iifname $PLC_IF oifname $SIM_IF ip saddr { 10.77.10.10, 10.77.10.20 } ip daddr 10.77.20.10 tcp dport 502 ct state new,established counter accept
     }
 }
 
@@ -211,7 +211,7 @@ views.
 Start a capture on Kali before starting either controller:
 
 ```bash
-sudo tcpdump -ni any 'host 10.77.10.10 and host 10.77.20.10 and tcp port 502'
+sudo tcpdump -ni any '(host 10.77.10.10 or host 10.77.10.20) and host 10.77.20.10 and tcp port 502'
 ```
 
 Alternatively, open Wireshark on Kali, capture on its lab interfaces, and use
@@ -224,7 +224,7 @@ tcp.port == 502
 If Wireshark does not decode port `502` as Modbus/TCP automatically, select a
 packet and use **Analyze > Decode As** to decode that TCP port as Modbus/TCP.
 
-Start the browser-based HMI on Kali in another terminal:
+Start the shared read-only browser HMI on Kali in another terminal:
 
 ```bash
 python3 simulator_monitor.py --host 10.77.20.10 --port 502 --unit-id 1
@@ -303,8 +303,9 @@ network settings. Confirm the HMI shows the reset state, then start the
 selected controller when ready.
 
 Permit inbound TCP port `502` to the simulator from the controller at
-`10.77.10.10` (forwarded through Kali) and the HMI host at
-`10.77.20.1` in any guest or Proxmox firewall that applies.
+`10.77.10.10` (forwarded through Kali), the Option B Control VM at
+`10.77.10.20` (forwarded through Kali), and the read-only HMI at `10.77.20.1`
+in any guest or Proxmox firewall that applies.
 
 ## Option A — OpenPLC Runtime v4 procedure
 
@@ -701,32 +702,38 @@ Modbus server. Keep Kali between the controller and simulator:
            10.77.10.1/24                           10.77.20.1/24
                  |                                      |
              PLC-LAB VNet                           SIM-LAB VNet
-                 |                                      |
- Python controller LXC                         Simulator LXC
-     10.77.10.10/24                               10.77.20.10/24
+       /                 \                             |
+Control VM          Python controller LXC         Simulator LXC
+10.77.10.20/24          10.77.10.10/24              10.77.20.10/24
 ```
 
 | Guest/interface | Network | Address and gateway/route |
 | --- | --- | --- |
 | Kali PLC-LAB NIC | `PLC-LAB` | `10.77.10.1/24` |
 | Python controller LXC | `PLC-LAB` | `10.77.10.10/24`, gateway `10.77.10.1` |
+| Option B Control VM | `PLC-LAB` | `10.77.10.20/24`, gateway `10.77.10.1` |
 | Kali SIM-LAB NIC | `SIM-LAB` | `10.77.20.1/24` |
 | Simulator NIC | `SIM-LAB` | `10.77.20.10/24`, gateway `10.77.20.1` |
 | Kali WAN NIC | Internet-facing Proxmox bridge | Upstream DHCP/static address; Kali default route |
 
 Create separate `PLC-LAB` and `SIM-LAB` networks. Kali needs NICs on both,
-plus its WAN NIC; do not attach the controller or simulator directly to the
-internet-facing bridge. Do not configure an OpenPLC Runtime, Editor Control
-VM, or MGMT network for this option. Configure the controller's default
-gateway as `10.77.10.1` and the simulator's as `10.77.20.1`. The controller
-route to the simulator must pass through Kali; do not add a direct
-controller-to-simulator interface or bypass route.
+plus its WAN NIC; do not attach the controller, Control VM, or simulator
+directly to the internet-facing bridge. The Option B Control VM is a normal
+operator workstation on `PLC-LAB`; it runs the interactive HMI but does not
+run OpenPLC Runtime or Editor. No separate MGMT network is required.
+Configure the controller and Control VM default gateways as `10.77.10.1`
+and the simulator gateway as `10.77.20.1`. Modbus traffic from both the
+controller and Control VM to the simulator must pass through Kali; do not add
+a direct controller-to-simulator interface or bypass route.
 
 1. Create a Debian/Ubuntu LXC named `python-controller` and attach its NIC to
    `PLC-LAB`. Configure `10.77.10.10/24` with default gateway `10.77.10.1`.
-2. Install Python 3.10 or newer and `openssh-server` in both containers.
-   Create an unprivileged `otlab` account in each, enable SSH, and prepare
-   the application directory:
+   Create/attach the Option B Control VM to `PLC-LAB` at `10.77.10.20/24`, gateway
+   `10.77.10.1`. Do not reuse the Option A Control VM's `MGMT` address for
+   this interface.
+2. Install Python 3.10 or newer and `openssh-server` in the simulator and
+   controller containers. Install Python 3.10 or newer on the Control VM.
+   In each LXC, install Python and SSH and prepare the service account:
 
    ```bash
    sudo apt-get update
@@ -737,22 +744,66 @@ controller-to-simulator interface or bypass route.
    sudo systemctl enable --now ssh
    ```
 
-   Copy the project files to `/opt/factoryio` in the relevant container,
-   owned by `otlab`: `factoryio_simulator.py` in the simulator LXC and
-   `reset_lab_process.py` in the simulator LXC, and
-   `factoryio_modbus_controller.py` in the controller LXC. Stop any copies
-   currently running in terminals before moving to the service-managed setup.
+   On the Control VM, install Python 3 and create the `otlab` service account:
+
+   ```bash
+   sudo apt-get update
+   sudo apt-get install -y python3
+   sudo useradd --create-home --shell /bin/bash otlab
+   sudo passwd otlab
+   sudo install -d -o otlab -g otlab /opt/factoryio
+   ```
+
+   Copy the project files to `/opt/factoryio` in the relevant guest, owned by
+   `otlab`: simulator and reset files to the simulator LXC; controller file
+   to the controller LXC; `optionb_control_hmi.py` and
+   `simulator_monitor.py` to the Control VM. Stop any copies currently
+   running in terminals before moving to the service-managed setup.
 3. Install the matching service unit from this repository:
 
    - Simulator LXC: copy `systemd/factoryio-simulator.service` to
      `/etc/systemd/system/factoryio-simulator.service`.
    - Controller LXC: copy `systemd/factoryio-controller.service` to
      `/etc/systemd/system/factoryio-controller.service`.
+   - Control VM: copy `systemd/optionb-control-hmi.service` to
+     `/etc/systemd/system/optionb-control-hmi.service`.
 
-   Then run `sudo systemctl daemon-reload` in each container. The simulator
+   Then run `sudo systemctl daemon-reload` in each guest. Generate a strong
+   random API token on a trusted administration workstation:
+
+   ```bash
+   openssl rand -hex 32
+   ```
+
+   Securely enter the same generated value in `/etc/factoryio/controller.env`
+   on the controller and `/etc/factoryio/control-hmi.env` on the Control VM.
+   Each file contains the single line `FACTORYIO_CONTROL_TOKEN=<generated-value>`.
+   On each guest, create the directory and edit the appropriate file:
+
+   ```bash
+   sudo install -d -o root -g otlab -m 0750 /etc/factoryio
+   sudoedit /etc/factoryio/controller.env
+   ```
+
+   On the Control VM, use `/etc/factoryio/control-hmi.env` with `sudoedit`.
+   Set each file's owner/group to `root:otlab` and mode to `0640`, for example:
+
+   ```bash
+   sudo chown root:otlab /etc/factoryio/controller.env
+   sudo chmod 0640 /etc/factoryio/controller.env
+   ```
+
+   Run the matching commands for `control-hmi.env` on the Control VM. Keep
+   the token out of shell history, source files, and screenshots. The controller API
+   listens on `10.77.10.10:8082`; its bearer token is sent over HTTP, so keep
+   the PLC-LAB isolated and permit that port only from `10.77.10.20`.
+   The HMI itself binds to Control VM loopback at `127.0.0.1:8083`.
+
+   The simulator
    unit runs as `otlab` and receives only `CAP_NET_BIND_SERVICE` to bind TCP
    `502`. The controller unit handles SIGINT on stop so it can turn its coils
-   off before exiting.
+   off before exiting. It starts with the production sequence stopped; the
+   HMI enables/disables that sequence through the controller API.
 4. Configure SSH access from Kali to `otlab@10.77.20.10` and
    `otlab@10.77.10.10` using a dedicated public key. Keep the private key on
    Kali. Restrict SSH ingress on the simulator to Kali's SIM-LAB address
@@ -790,7 +841,15 @@ controller-to-simulator interface or bypass route.
    Use `factoryio-controller.service` instead of
    `factoryio-simulator.service` in the controller container's rule. Validate
    the file with `sudo visudo -cf /etc/sudoers.d/otlab-factoryio`.
-5. On Kali, copy `start_option_b_from_kali.sh` from this repository and make
+5. On the controller LXC, restrict inbound TCP `8082` to the Control VM
+   (`10.77.10.20`) using its host firewall. For example, with UFW:
+
+   ```bash
+   sudo ufw allow from 10.77.10.20 to any port 8082 proto tcp
+   ```
+
+   Ensure the host firewall denies TCP `8082` from every other source.
+   On Kali, copy `start_option_b_from_kali.sh` from this repository and make
    it executable with `chmod +x start_option_b_from_kali.sh`. Test both
    targets with the dedicated key:
 
@@ -812,22 +871,22 @@ controller-to-simulator interface or bypass route.
    SSH_IDENTITY_FILE=~/.ssh/factoryio-optionb ./start_option_b_from_kali.sh stop
    ```
 
-   The `start` command starts the simulator and controller, then pulses the
-   simulator's StartButton through its loopback-only control endpoint.
-   `restart` does the same after restarting both services. The script stops
-   the controller before the simulator. It changes no VNet, route, or Modbus
-   forwarding settings. SSH is for service and process-start control; the
-   Modbus data flow remains `10.77.10.10` through Kali to `10.77.20.10`.
-7. On Kali, allow TCP `502` from the controller through to the simulator and
+   The `start` command starts the simulator and the controller service. The
+   controller service remains active but its production sequence is stopped
+   until an operator presses Start in the Control VM HMI. The `restart`
+   command restarts the services without pulsing simulator StartButton.
+   `stop` stops the controller service before the simulator. The script
+   changes no VNet, route, or Modbus forwarding settings.
+7. On Kali, allow TCP `502` from the controller and Control VM through to the simulator and
    established return traffic. The common Kali gateway section has the
    example forwarding rule; use Kali's `PLC-LAB` and `SIM-LAB` interface
    names. Capture with:
 
    ```bash
-   sudo tcpdump -ni any 'host 10.77.10.10 and host 10.77.20.10 and tcp port 502'
+   sudo tcpdump -ni any '(host 10.77.10.10 or host 10.77.10.20) and host 10.77.20.10 and tcp port 502'
    ```
 
-8. From the controller LXC, verify the route and TCP reachability:
+8. From the controller LXC and Control VM, verify route and TCP reachability:
 
    ```bash
    ip route get 10.77.20.10
@@ -835,28 +894,38 @@ controller-to-simulator interface or bypass route.
    ```
 
    The route must go through `10.77.10.1` and the TCP connection must succeed.
-9. The controller can also be started manually in the controller LXC instead
-   of through the Kali launcher:
+9. From the Control VM, start the HMI service and open it locally:
 
    ```bash
-   python3 factoryio_modbus_controller.py --host 10.77.20.10 --port 502 --unit-id 1
+   sudo systemctl enable --now optionb-control-hmi.service
    ```
 
-   It polls the first six discrete inputs with FC 2, writes all five coils
-   together with FC 15, and prints its state and output changes. It starts in
-   `WAIT_START`. If the simulator is running interactively, enter `start` at
-   its `sim>` prompt to pulse `StartButton`; when using the systemd services,
-   use the Kali launcher, which starts both services and pulses the button.
-   Enter `door open` at an interactive simulator prompt to stop outputs and
-   reset the sequence; close the door and issue `start` again to resume.
-   Press Ctrl+C in the controller terminal to stop it; on normal shutdown it
-   attempts to turn all five coils off.
-10. Open the HMI at `http://127.0.0.1:8080/` in Kali's browser. The
-   display shows live process signals and approximate motion, while Wireshark
-   shows the controller's FC 2 requests and FC 15 coil writes. The HMI's own
-   FC 2 and FC 1 polling is a separate connection sourced from Kali at `10.77.20.1`.
-   The Modbus exchange itself is direct controller-to-simulator over the
-   routed Kali path; Kali is not acting as an active Modbus proxy.
+   Open `http://127.0.0.1:8083/` in the Control VM browser. The HMI shows
+   controller state and RTU signals; Start and Stop operate the controller
+   sequence. Tank buttons write only the tank's FC 05 coils (addresses 5–8).
+   The existing `simulator_monitor.py` on Kali remains a separate read-only
+   HMI.
+10. For manual controller diagnosis, run it in the controller LXC with a
+    valid `FACTORYIO_CONTROL_TOKEN`, binding the operator API only to its
+    PLC-LAB interface:
+
+    ```bash
+   set -a
+   source /etc/factoryio/controller.env
+   set +a
+   python3 factoryio_modbus_controller.py --host 10.77.20.10 --port 502 --unit-id 1 --control-host 10.77.10.10 --control-port 8082
+    ```
+
+    It remains stopped until a Start request reaches its API; a simulator
+    StartButton pulse is no longer the Option B run command. An open safety
+    door trips the controller and requires the operator to close the door
+    and press Start again. Press Ctrl+C to stop the service process; on
+    normal shutdown it attempts to turn its five line coils off.
+11. Open the read-only monitor at `http://127.0.0.1:8080/` in Kali's browser.
+    The Control VM HMI polls the simulator from `10.77.10.20`; Wireshark can
+    distinguish its FC 1/2/4/5 traffic from the controller's FC 2/15 traffic.
+    All Modbus exchanges to the simulator route through Kali; Kali is not an
+    active Modbus proxy.
 
 This Python option replaces the PLC logic for this introductory exercise. It
 does not run an OpenPLC Runtime, execute IEC 61131-3 programs, or connect to
