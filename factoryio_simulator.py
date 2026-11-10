@@ -14,8 +14,8 @@ import time
 from dataclasses import dataclass, field
 
 
-INPUT_COUNT = 7
-COIL_COUNT = 5
+INPUT_COUNT = 12
+COIL_COUNT = 9
 DEFAULT_MODBUS_PORT = 502
 INPUT_NAMES = (
     "StartButton",
@@ -25,11 +25,30 @@ INPUT_NAMES = (
     "MovingZ",
     "Rotating",
     "BoxPresent",
+    "TankLow",
+    "TankHigh",
+    "MixerRunning",
+    "TransferFlow",
+    "TankOverflow",
 )
-COIL_NAMES = ("Conveyor", "Grab", "ExtendZ", "RotateCW", "RotateCCW")
+COIL_NAMES = (
+    "Conveyor",
+    "Grab",
+    "ExtendZ",
+    "RotateCW",
+    "RotateCCW",
+    "FillValve",
+    "Mixer",
+    "TransferPump",
+    "DrainValve",
+)
 CONVEYOR_SPEED = 0.15
 PICKER_ROTATION_SECONDS = 1.6
 PICKER_Z_TRANSITION_SECONDS = 0.75
+TANK_LOW_LEVEL = 20.0
+TANK_HIGH_LEVEL = 80.0
+TANK_OVERFLOW_LEVEL = 95.0
+TANK_MAX_TEMPERATURE = 100.0
 
 
 @dataclass
@@ -49,6 +68,8 @@ class Process:
     z_transition_until: float = 0.0
     robot_angle: float = 0.0
     rotation_direction: int = 0
+    tank_level: float = 25.0
+    tank_temperature: float = 20.0
     events: deque[str] = field(default_factory=lambda: deque(maxlen=100))
     request_counts: list[int] = field(default_factory=lambda: [0] * 16)
 
@@ -66,7 +87,26 @@ class Process:
                 now < self.z_transition_until,
                 self.rotation_direction != 0,
                 self.box_position is not None or self.box_held,
+                self.tank_level <= TANK_LOW_LEVEL,
+                self.tank_level >= TANK_HIGH_LEVEL,
+                self.door_closed
+                and self.coils[6]
+                and not self.coils[7]
+                and self.tank_level > 0,
+                self.door_closed
+                and self.coils[7]
+                and not self.coils[6]
+                and self.tank_level > 0,
+                self.tank_level >= TANK_OVERFLOW_LEVEL,
             ]
+
+    def read_input_registers(self, address: int, count: int) -> list[int]:
+        with self.lock:
+            values = [
+                round(self.tank_level * 10),
+                round(self.tank_temperature * 10),
+            ]
+            return values[address : address + count]
 
     def read_coils(self, address: int, count: int) -> list[bool]:
         with self.lock:
@@ -96,6 +136,8 @@ class Process:
             self.z_transition_until = 0.0
             self.robot_angle = 0.0
             self.rotation_direction = 0
+            self.tank_level = 25.0
+            self.tank_temperature = 20.0
             self.events.clear()
             self.request_counts = [0] * len(self.request_counts)
 
@@ -147,6 +189,8 @@ class Process:
                 f"door={'closed' if self.door_closed else 'open'} "
                 f"box_position={box} box_held={self.box_held} "
                 f"removed={self.boxes_removed} auto_emitter={self.auto_emitter}\n"
+                f"tank_level={self.tank_level:.1f}% "
+                f"tank_temperature={self.tank_temperature:.1f}C\n"
                 f"inputs={inputs} coils={coils}"
             )
 
@@ -161,7 +205,31 @@ class Process:
             if not self.door_closed:
                 return
 
-            conveyor, grab, extend_z, rotate_cw, rotate_ccw = self.coils
+            conveyor, grab, extend_z, rotate_cw, rotate_ccw = self.coils[:5]
+            fill_valve, mixer, transfer_pump, drain_valve = self.coils[5:]
+
+            if fill_valve and not drain_valve:
+                self.tank_level = min(100.0, self.tank_level + 6.0 * dt)
+            elif drain_valve and not fill_valve:
+                self.tank_level = max(0.0, self.tank_level - 12.0 * dt)
+
+            mixer_running = (
+                mixer and not transfer_pump and self.tank_level > 0
+            )
+            transfer_flow = (
+                transfer_pump and not mixer and self.tank_level > 0
+            )
+            if transfer_flow:
+                self.tank_level = max(0.0, self.tank_level - 4.0 * dt)
+            if mixer_running:
+                self.tank_temperature = min(
+                    TANK_MAX_TEMPERATURE,
+                    self.tank_temperature + 0.15 * dt,
+                )
+            else:
+                self.tank_temperature += (
+                    20.0 - self.tank_temperature
+                ) * min(dt * 0.02, 1.0)
 
             if extend_z != self.z_down:
                 self.z_down = extend_z
@@ -230,6 +298,8 @@ class Process:
                 f"Conveyor: {box}\n"
                 f"Picker: Z={'DOWN' if self.z_down else 'UP'} "
                 f"angle={angle:.0f}deg | Removed: {self.boxes_removed}\n"
+                f"Tank: level={self.tank_level:.1f}% "
+                f"temperature={self.tank_temperature:.1f}C\n"
                 f"Inputs: " + "  ".join(
                     f"{name}={'ON' if value else 'off'}"
                     for name, value in zip(INPUT_NAMES, inputs)
@@ -294,6 +364,18 @@ def process_pdu(
         for index, value in enumerate(values):
             if value:
                 packed[index // 8] |= 1 << (index % 8)
+        return bytes((function, len(packed))) + packed
+
+    if function == 4:
+        if len(pdu) != 5:
+            return _exception_response(function, 3)
+        address, count = struct.unpack(">HH", pdu[1:])
+        if count < 1 or count > 125:
+            return _exception_response(function, 3)
+        if address + count > 2:
+            return _exception_response(function, 2)
+        registers = process.read_input_registers(address, count)
+        packed = b"".join(struct.pack(">H", value) for value in registers)
         return bytes((function, len(packed))) + packed
 
     if function == 5:
@@ -440,7 +522,10 @@ def run_simulation(process: Process, tick: float) -> None:
 
 
 def run_cli(process: Process) -> None:
-    print("Commands: start, box, door open|close, auto on|off, reset, status, help, quit")
+    print(
+        "Commands: start, box, door open|close, auto on|off, "
+        "coil <name> on|off, reset, status, help, quit"
+    )
     while True:
         try:
             command = input("sim> ").strip().lower().split()
@@ -453,6 +538,7 @@ def run_cli(process: Process) -> None:
         if command == ["help"]:
             print("start: pulse the start button; box: add a box at the emitter")
             print("door open|close: set the safety door; auto on|off: emitter mode")
+            print("coil <name> on|off: manually set a named output coil")
             print("reset: restore the simulator startup state")
             print("status: show process state; quit: stop the simulator")
         elif command == ["start"]:
@@ -466,6 +552,19 @@ def run_cli(process: Process) -> None:
         elif command[:1] == ["auto"] and len(command) == 2 and command[1] in ("on", "off"):
             process.set_auto_emitter(command[1] == "on")
             print(f"Emitter {'enabled' if command[1] == 'on' else 'disabled'}.")
+        elif (
+            command[:1] == ["coil"]
+            and len(command) == 3
+            and command[1] in {name.lower() for name in COIL_NAMES}
+            and command[2] in ("on", "off")
+        ):
+            address = next(
+                index
+                for index, name in enumerate(COIL_NAMES)
+                if name.lower() == command[1]
+            )
+            process.write_coils(address, [command[2] == "on"])
+            print(f"{COIL_NAMES[address]} {command[2].upper()}.")
         elif command == ["reset"]:
             process.reset()
             print("Simulator process reset to startup baseline.")

@@ -21,8 +21,23 @@ INPUTS = (
     "MovingZ",
     "Rotating",
     "BoxPresent",
+    "TankLow",
+    "TankHigh",
+    "MixerRunning",
+    "TransferFlow",
+    "TankOverflow",
 )
-COILS = ("Conveyor", "Grab", "ExtendZ", "RotateCW", "RotateCCW")
+COILS = (
+    "Conveyor",
+    "Grab",
+    "ExtendZ",
+    "RotateCW",
+    "RotateCCW",
+    "FillValve",
+    "Mixer",
+    "TransferPump",
+    "DrainValve",
+)
 DEFAULT_MODBUS_PORT = 502
 
 HMI_PAGE = """<!doctype html>
@@ -82,6 +97,8 @@ HMI_PAGE = """<!doctype html>
     #box { fill: var(--amber); stroke: #fff0c2; stroke-width: 2; }
     #dropBox { fill: #ffc857; stroke: #fff0c2; stroke-width: 2; display: none; }
     .bin { fill: #25343c; stroke: #82939b; stroke-width: 3; }
+    .tank { fill: #263b47; stroke: #82939b; stroke-width: 3; }
+    .tank-liquid { fill: #278ab2; opacity: .8; }
     .signal-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .55rem; }
     .signal { display: flex; justify-content: space-between; align-items: center;
       gap: .5rem; border: 1px solid var(--line); border-radius: 8px; padding: .6rem .65rem;
@@ -104,7 +121,7 @@ HMI_PAGE = """<!doctype html>
 </head>
 <body>
   <header>
-    <div><div class="eyebrow">OT / SCADA training display</div><h1>Conveyor &amp; Pick-and-Place</h1></div>
+    <div><div class="eyebrow">OT / SCADA training display</div><h1>Packaging &amp; Batch Treatment RTU</h1></div>
     <div class="topline">
       <span id="connection" class="badge offline">CONNECTING</span>
       <span id="door" class="badge safety">DOOR —</span>
@@ -117,8 +134,8 @@ HMI_PAGE = """<!doctype html>
         <h2>Process overview</h2>
         <div class="diagram-wrap">
           <svg viewBox="0 0 1000 390" role="img" aria-labelledby="diagramTitle diagramDescription">
-            <title id="diagramTitle">Conveyor and pick-and-place process</title>
-            <desc id="diagramDescription">Approximate process animation derived from Modbus input and output states.</desc>
+            <title id="diagramTitle">Packaging line and batch treatment tank</title>
+            <desc id="diagramDescription">Process animation and tank telemetry derived from Modbus inputs, outputs, and registers.</desc>
             <rect x="70" y="215" width="600" height="75" rx="8" class="machine"/>
             <line x1="105" y1="252" x2="625" y2="252" class="track"/>
             <g id="rollers">
@@ -127,6 +144,16 @@ HMI_PAGE = """<!doctype html>
               <circle cx="410" cy="252" r="13" class="roller"/><circle cx="480" cy="252" r="13" class="roller"/>
               <circle cx="550" cy="252" r="13" class="roller"/><circle cx="620" cy="252" r="13" class="roller"/>
             </g>
+            <rect x="95" y="58" width="145" height="133" rx="8" class="tank"/>
+            <rect id="tankLiquid" x="105" y="181" width="125" height="0" class="tank-liquid"/>
+            <line x1="95" y1="84" x2="240" y2="84" class="sensor"/>
+            <line x1="95" y1="164" x2="240" y2="164" class="sensor"/>
+            <text x="115" y="48" class="machine-label">BATCH TANK</text>
+            <text x="111" y="108" class="small-label">HIGH LEVEL</text>
+            <text x="111" y="153" class="small-label">LOW LEVEL</text>
+            <circle cx="270" cy="111" r="20" class="machine"/>
+            <text x="258" y="116" class="small-label">MIX</text>
+            <path d="M240 111 H250 M290 111 H320 V215" fill="none" stroke="#70c7f5" stroke-width="5"/>
             <text x="275" y="325" class="machine-label">CONVEYOR</text>
             <line x1="610" y1="195" x2="610" y2="303" class="sensor"/>
             <text x="566" y="185" class="small-label">PICKUP SENSOR</text>
@@ -146,9 +173,13 @@ HMI_PAGE = """<!doctype html>
           </svg>
         </div>
         <div class="telemetry"><span>Conveyor: <b id="conveyorMotion">STOPPED</b></span>
-          <span>Picker: <b id="pickerMotion">IDLE</b></span><span id="updated">Waiting for data</span></div>
+          <span>Picker: <b id="pickerMotion">IDLE</b></span>
+          <span>Tank: <b id="tankLevel">—</b></span>
+          <span>Temperature: <b id="tankTemperature">—</b></span>
+          <span id="updated">Waiting for data</span></div>
         <p class="notice">Read-only HMI. The animation estimates motion from Modbus I/O states;
           exact position, box count, and simulator internals are not exposed by this I/O map.
+          Tank level and temperature are read from Modbus input registers.
           This is a training display, not a safety-rated or supervisory control system.</p>
       </section>
       <section class="panel">
@@ -160,17 +191,20 @@ HMI_PAGE = """<!doctype html>
     </div>
   </main>
   <script>
-    const inputNames = ["StartButton", "SafetyDoorClosed", "BoxAtSensor", "RobotDetected", "MovingZ", "Rotating", "BoxPresent"];
-    const coilNames = ["Conveyor", "Grab", "ExtendZ", "RotateCW", "RotateCCW"];
+    const inputNames = ["StartButton", "SafetyDoorClosed", "BoxAtSensor", "RobotDetected", "MovingZ", "Rotating", "BoxPresent", "TankLow", "TankHigh", "MixerRunning", "TransferFlow", "TankOverflow"];
+    const coilNames = ["Conveyor", "Grab", "ExtendZ", "RotateCW", "RotateCCW", "FillValve", "Mixer", "TransferPump", "DrainValve"];
     const inputLabels = {
       StartButton: "Start button", SafetyDoorClosed: "Safety door closed",
       BoxAtSensor: "Box at pickup", RobotDetected: "Picker detects box",
       MovingZ: "Picker Z moving", Rotating: "Picker rotating",
-      BoxPresent: "Box in process"
+      BoxPresent: "Box in process", TankLow: "Tank low", TankHigh: "Tank high",
+      MixerRunning: "Mixer running", TransferFlow: "Transfer flow",
+      TankOverflow: "Tank overflow"
     };
     const coilLabels = {
       Conveyor: "Conveyor", Grab: "Gripper", ExtendZ: "Extend Z",
-      RotateCW: "Rotate toward drop", RotateCCW: "Rotate toward pickup"
+      RotateCW: "Rotate toward drop",       RotateCCW: "Rotate toward pickup", FillValve: "Tank fill valve",
+      Mixer: "Tank mixer", TransferPump: "Transfer pump", DrainValve: "Tank drain"
     };
     const inputsRoot = document.getElementById("inputs");
     const coilsRoot = document.getElementById("coils");
@@ -251,6 +285,17 @@ HMI_PAGE = """<!doctype html>
         data.coils.RotateCCW ? "RETURNING" :
         data.coils.ExtendZ ? "LOWERED" : data.coils.Grab ? "HOLDING" : "IDLE";
       document.getElementById("pickerMotion").textContent = picker;
+      const tankLevel = data.process.TankLevelPct;
+      const tankTemperature = data.process.TankTemperatureC;
+      document.getElementById("tankLevel").textContent =
+        tankLevel === null ? "UNAVAILABLE" : tankLevel.toFixed(1) + "%";
+      document.getElementById("tankTemperature").textContent =
+        tankTemperature === null ? "UNAVAILABLE" : tankTemperature.toFixed(1) + " °C";
+      const liquidHeight = tankLevel === null ? 0 : 105 * tankLevel / 100;
+      const liquid = document.getElementById("tankLiquid");
+      liquid.setAttribute("y", 189 - liquidHeight);
+      liquid.setAttribute("height", liquidHeight);
+      liquid.style.fill = data.inputs.TankOverflow ? "var(--red)" : "#278ab2";
       const connection = document.getElementById("connection");
       connection.textContent = data.connected ? "LIVE" : "RECONNECTING";
       connection.className = "badge " + (data.connected ? "live" : "offline");
@@ -353,8 +398,9 @@ def read_bits(
     unit_id: int,
     function: int,
     count: int,
+    address: int = 0,
 ) -> list[bool]:
-    request_pdu = struct.pack(">BHH", function, 0, count)
+    request_pdu = struct.pack(">BHH", function, address, count)
     request_header = struct.pack(">HHHB", transaction_id, 0, len(request_pdu) + 1, unit_id)
     connection.sendall(request_header + request_pdu)
 
@@ -372,7 +418,7 @@ def read_bits(
         exception_code = response_pdu[1] if len(response_pdu) > 1 else "unknown"
         if not isinstance(exception_code, int):
             raise ValueError(f"Modbus exception code {exception_code}")
-        raise ModbusExceptionError(function, exception_code, 0, count)
+        raise ModbusExceptionError(function, exception_code, address, count)
     expected_bytes = (count + 7) // 8
     if (
         len(response_pdu) != expected_bytes + 2
@@ -387,32 +433,109 @@ def read_bits(
     ]
 
 
+def read_input_registers(
+    connection: socket.socket,
+    transaction_id: int,
+    unit_id: int,
+    address: int,
+    count: int,
+) -> list[int]:
+    request_pdu = struct.pack(">BHH", 4, address, count)
+    request_header = struct.pack(">HHHB", transaction_id, 0, len(request_pdu) + 1, unit_id)
+    connection.sendall(request_header + request_pdu)
+
+    header = receive_exactly(connection, 7)
+    response_transaction, protocol, length, response_unit = struct.unpack(">HHHB", header)
+    if response_transaction != transaction_id or protocol != 0:
+        raise ValueError("invalid Modbus/TCP response header")
+    if response_unit != unit_id or not 2 <= length <= 254:
+        raise ValueError("unexpected Modbus/TCP unit ID or response length")
+
+    response_pdu = receive_exactly(connection, length - 1)
+    if not response_pdu:
+        raise ValueError("empty Modbus response")
+    if response_pdu[0] == 4 | 0x80:
+        exception_code = response_pdu[1] if len(response_pdu) > 1 else "unknown"
+        if not isinstance(exception_code, int):
+            raise ValueError(f"Modbus exception code {exception_code}")
+        raise ModbusExceptionError(4, exception_code, address, count)
+    expected_bytes = count * 2
+    if (
+        len(response_pdu) != expected_bytes + 2
+        or response_pdu[0] != 4
+        or response_pdu[1] != expected_bytes
+    ):
+        raise ValueError("unexpected Modbus register response")
+    return [
+        struct.unpack(">H", response_pdu[2 + index * 2 : 4 + index * 2])[0]
+        for index in range(count)
+    ]
+
+
 def read_snapshot(
     connection: socket.socket, transaction_id: int, unit_id: int
-) -> tuple[dict[str, bool], dict[str, bool], int]:
-    requested_count = len(INPUTS)
-    while True:
+) -> tuple[dict[str, bool], dict[str, bool], dict[str, float | None], int]:
+    def read_bits_next(function: int, count: int, address: int = 0) -> list[bool]:
+        nonlocal transaction_id
+        values = read_bits(
+            connection, transaction_id, unit_id, function, count, address
+        )
+        transaction_id = (transaction_id + 1) & 0xFFFF
+        return values
+
+    has_box_present_input = True
+    try:
+        input_values = read_bits_next(2, len(INPUTS))
+    except ModbusExceptionError as error:
+        if error.function != 2 or error.code != 2:
+            raise
+        transaction_id = (transaction_id + 1) & 0xFFFF
         try:
-            input_values = read_bits(
-                connection, transaction_id, unit_id, 2, requested_count
-            )
-            break
-        except ModbusExceptionError as error:
-            if error.function != 2 or error.code != 2 or requested_count == 1:
+            input_values = read_bits_next(2, 7)
+        except ModbusExceptionError as base_error:
+            if base_error.function != 2 or base_error.code != 2:
                 raise
-            requested_count -= 1
             transaction_id = (transaction_id + 1) & 0xFFFF
-    transaction_id = (transaction_id + 1) & 0xFFFF
-    coils = read_bits(connection, transaction_id, unit_id, 1, len(COILS))
-    transaction_id = (transaction_id + 1) & 0xFFFF
+            input_values = read_bits_next(2, 6)
+            has_box_present_input = False
+        input_values.extend([False] * (len(INPUTS) - len(input_values)))
+
+    try:
+        coils = read_bits_next(1, len(COILS))
+    except ModbusExceptionError as error:
+        if error.function != 1 or error.code != 2:
+            raise
+        transaction_id = (transaction_id + 1) & 0xFFFF
+        coils = read_bits_next(1, 5)
+        coils.extend([False] * (len(COILS) - len(coils)))
+
+    try:
+        registers = read_input_registers(
+            connection, transaction_id, unit_id, 0, 2
+        )
+        transaction_id = (transaction_id + 1) & 0xFFFF
+        process_values: dict[str, float | None] = {
+            "TankLevelPct": registers[0] / 10,
+            "TankTemperatureC": registers[1] / 10,
+        }
+    except ModbusExceptionError as error:
+        if error.function != 4 or error.code != 1:
+            raise
+        transaction_id = (transaction_id + 1) & 0xFFFF
+        process_values = {
+            "TankLevelPct": None,
+            "TankTemperatureC": None,
+        }
+
     input_values.extend([False] * (len(INPUTS) - len(input_values)))
-    if requested_count < len(INPUTS):
+    if not has_box_present_input:
         input_values[6] = (
             input_values[2] or input_values[3] or coils[0] or coils[1]
         )
     return (
         dict(zip(INPUTS, input_values, strict=True)),
         dict(zip(COILS, coils, strict=True)),
+        process_values,
         transaction_id,
     )
 
@@ -424,6 +547,10 @@ class HMIState:
             "connected": False,
             "inputs": {name: False for name in INPUTS},
             "coils": {name: False for name in COILS},
+            "process": {
+                "TankLevelPct": None,
+                "TankTemperatureC": None,
+            },
             "updated_at": None,
             "error": "Waiting for the first Modbus response",
         }
@@ -432,12 +559,21 @@ class HMIState:
         self,
         inputs: dict[str, bool] | None = None,
         coils: dict[str, bool] | None = None,
+        process: dict[str, float | None] | None = None,
         error: str | None = None,
     ) -> None:
         with self._lock:
             if inputs is not None and coils is not None:
                 self._snapshot["inputs"] = inputs.copy()
                 self._snapshot["coils"] = coils.copy()
+                self._snapshot["process"] = (
+                    process.copy()
+                    if process is not None
+                    else {
+                        "TankLevelPct": None,
+                        "TankTemperatureC": None,
+                    }
+                )
                 self._snapshot["updated_at"] = datetime.now(timezone.utc).isoformat()
                 self._snapshot["connected"] = True
                 self._snapshot["error"] = None
@@ -451,6 +587,7 @@ class HMIState:
                 **self._snapshot,
                 "inputs": self._snapshot["inputs"].copy(),
                 "coils": self._snapshot["coils"].copy(),
+                "process": self._snapshot["process"].copy(),
             }
 
 
@@ -483,10 +620,10 @@ class ModbusPoller(threading.Thread):
                         (self.host, self.port), timeout=self.timeout
                     )
                     self.connection.settimeout(self.timeout)
-                inputs, coils, self.transaction_id = read_snapshot(
+                inputs, coils, process, self.transaction_id = read_snapshot(
                     self.connection, self.transaction_id, self.unit_id
                 )
-                self.state.update(inputs, coils)
+                self.state.update(inputs, coils, process)
                 self.stop_event.wait(self.interval)
             except (OSError, ValueError) as error:
                 if self.connection is not None:

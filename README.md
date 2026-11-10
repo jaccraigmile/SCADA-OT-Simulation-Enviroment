@@ -2,8 +2,8 @@
 
 This project provides a small, fully virtual operational technology (OT) and
 supervisory control and data acquisition (SCADA) training environment. It
-replaces the Factory I/O process scene with a Python conveyor and
-pick-and-place simulator that communicates over Modbus/TCP. Students can
+replaces the Factory I/O process scene with a Python packaging-line and
+batch-treatment simulator that communicates over Modbus/TCP. Students can
 operate the process, inspect network traffic, test the exposed protocol
 within the isolated lab, investigate process effects, and practice network
 defense.
@@ -19,10 +19,11 @@ by the current code.
 
 | Component | Role |
 | --- | --- |
-| [factoryio_simulator.py](./factoryio_simulator.py) | Headless process model and Modbus/TCP server. Models the conveyor, box, picker, safety-door input, and five output coils; prints every valid FC 15 write with named output states, while process status is shown on request at the simulator prompt. |
+| [factoryio_simulator.py](./factoryio_simulator.py) | Process model and Modbus/TCP server. Models the conveyor/picker line and a batch tank with fill, mix, transfer, and drain equipment; prints every valid FC 15 write with named output states. |
 | [factoryio_modbus_controller.py](./factoryio_modbus_controller.py) | Optional standalone Python Modbus/TCP client/controller. Runs a pick-and-place sequence without OpenPLC. |
+| [OPTION_A_LADDER_RECREATION.st](./OPTION_A_LADDER_RECREATION.st) | Structured Text body reproducing the supplied OpenPLC ladder rungs; variable-table setup and behavioral caveats are in the environment guide. |
 | [start_option_b_from_kali.sh](./start_option_b_from_kali.sh) | Starts, stops, restarts, or checks the Option B simulator and controller services remotely from Kali over SSH. |
-| [simulator_monitor.py](./simulator_monitor.py) | Browser-based, read-only HMI. Polls simulator inputs/coils and displays process signals and inferred motion. |
+| [simulator_monitor.py](./simulator_monitor.py) | Browser-based, read-only HMI. Polls simulator inputs, coils, and input registers; displays line signals, inferred motion, tank level, and temperature. |
 | [reset_lab_process.py](./reset_lab_process.py) | Starts or resets the simulator process through its loopback-only control endpoint. |
 | [test_factoryio_simulator.py](./test_factoryio_simulator.py) | Unit and integration tests for the simulator, controller communication, HMI, and reset behavior. |
 
@@ -72,9 +73,11 @@ safety-rated or supervisory control system.
 ## Process model and Modbus map
 
 The simulator emits a box automatically every five seconds by default.
-Controller coils move the box and picker; opening the simulated safety door
-pauses process motion. The simulator is a behavioral training model, not a
-3D Factory I/O scene or physical-control system.
+Controller coils move the box and picker. Additional coils operate the batch
+tank fill valve, mixer, transfer pump, and drain valve; tank level and
+temperature are available as Modbus input registers. Opening the simulated
+safety door pauses process motion. The simulator is a behavioral training
+model, not a 3D Factory I/O scene or physical-control system.
 The conveyor takes about 6.7 seconds to carry a box from the emitter to the
 pickup sensor, and a full picker rotation takes about 1.6 seconds so motion is
 easy to observe in the HMI.
@@ -93,11 +96,30 @@ FC 15 to write all five outputs together.
 | 4 | Discrete input | MovingZ | Picker Z axis is transitioning. |
 | 5 | Discrete input | Rotating | Picker is rotating. |
 | 6 | Discrete input | BoxPresent | A box is on the conveyor or held by the picker. |
+| 7 | Discrete input | TankLow | Tank level is at or below 20%. |
+| 8 | Discrete input | TankHigh | Tank level is at or above 80%. |
+| 9 | Discrete input | MixerRunning | Mixer is operating; mixing and transfer are interlocked. |
+| 10 | Discrete input | TransferFlow | Transfer pump is moving liquid from a non-empty tank. |
+| 11 | Discrete input | TankOverflow | Tank level is at or above 95%. |
 | 0 | Coil | Conveyor | Advances a box on the conveyor. |
 | 1 | Coil | Grab | Picks up or releases a box, depending on process position. |
 | 2 | Coil | ExtendZ | Extends the picker; off retracts it. |
 | 3 | Coil | RotateCW | Moves the picker toward the drop point. |
 | 4 | Coil | RotateCCW | Returns the picker toward the conveyor. |
+| 5 | Coil | FillValve | Fills the tank at 6 percentage points per second. |
+| 6 | Coil | Mixer | Mixes and warms the tank; inhibited while transfer is requested. |
+| 7 | Coil | TransferPump | Transfers liquid out at 4 percentage points per second; inhibited while mixing is requested. |
+| 8 | Coil | DrainValve | Drains the tank at 12 percentage points per second; fill and drain cannot run together. |
+
+Input registers use function code 04. Address 0 is tank level in tenths of a
+percent (0–1000); address 1 is tank temperature in tenths of a degree Celsius.
+The tank starts at 25.0% and 20.0 °C. The browser HMI remains read-only. In
+interactive simulator mode, `coil <name> on|off` manually sets an output
+(for example, `coil FillValve on`); do not manually drive outputs while a
+controller is connected. A quick tank exercise is to turn on `FillValve`
+until the level rises above the low switch, turn it off, run `Mixer`, then
+turn the mixer off before running `TransferPump`. Watch the live values and
+switch states in the HMI.
 
 The simulator supports the Modbus exchanges examined in the
 [Wireshark Modbus/TCP tutorial](https://rodrigocantera.com/en/dissecting-openplc-modbus-tcp-communications-with-wireshark/).
@@ -116,7 +138,7 @@ python3 factoryio_simulator.py --host 0.0.0.0 --port 502 --unit-id 1
 ```
 
 The prompt accepts `status`, `start`, `box`, `door open`, `door close`,
-`auto on`, `auto off`, `reset`, and `quit`. For the complete Proxmox setup,
+`auto on`, `auto off`, `coil <name> on|off`, `reset`, and `quit`. For the complete Proxmox setup,
 including required guest firewall access, follow
 [OT_SCADA_ENVIRONMENT_SETUP.md](./OT_SCADA_ENVIRONMENT_SETUP.md).
 
@@ -130,8 +152,9 @@ python3 reset_lab_process.py --confirm
 ```
 
 This restores the process state to door closed, all coils off, no box,
-picker at home, zero removed boxes, automatic emitter on, and cleared
-request/event counters. You can also enter `reset` at the simulator prompt.
+picker at home, tank level 25.0%, tank temperature 20.0 °C, zero removed
+boxes, automatic emitter on, and cleared request/event counters. You can also
+enter `reset` at the simulator prompt.
 This is a **process-only reset**: it does not restart or reconfigure the
 controller, restore a VM snapshot, or change Kali, firewall, or Proxmox
 network settings. The setup guide documents the reset details.

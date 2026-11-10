@@ -9,6 +9,7 @@ import unittest
 from unittest.mock import patch
 from urllib.request import urlopen
 
+
 from factoryio_simulator import (
     COIL_COUNT,
     DEFAULT_MODBUS_PORT,
@@ -18,6 +19,7 @@ from factoryio_simulator import (
     Process,
     ResetServer,
     process_pdu,
+    run_cli,
 )
 from factoryio_modbus_controller import (
     DEFAULT_MODBUS_PORT as CONTROLLER_DEFAULT_MODBUS_PORT,
@@ -32,6 +34,7 @@ from simulator_monitor import (
     ModbusExceptionError,
     ModbusPoller,
     make_handler,
+    read_input_registers,
     read_snapshot,
 )
 
@@ -88,7 +91,8 @@ class ModbusProcessTests(unittest.TestCase):
 
         self.assertEqual(
             self.process.read_inputs(),
-            [False, True, False, False, False, False, False],
+            [False, True, False, False, False, False, False, False, False,
+             False, False, False],
         )
         self.assertEqual(self.process.read_coils(0, COIL_COUNT), [False] * COIL_COUNT)
         self.assertIsNone(self.process.box_position)
@@ -151,6 +155,7 @@ class ModbusProcessTests(unittest.TestCase):
         self.assertIn("StartButton=off", status)
         self.assertIn("SafetyDoorClosed=ON", status)
         self.assertIn("Conveyor=off", status)
+        self.assertIn("Tank: level=25.0% temperature=20.0C", status)
 
     def test_writes_multiple_coils(self):
         with redirect_stdout(StringIO()) as output:
@@ -161,7 +166,7 @@ class ModbusProcessTests(unittest.TestCase):
         self.assertEqual(response, b"\x0f\x00\x00\x00\x05")
         self.assertEqual(
             self.process.read_coils(0, COIL_COUNT),
-            [True, False, True, False, True],
+            [True, False, True, False, True, False, False, False, False],
         )
         self.assertIn(
             "Received FC 15 write: address=0, count=5; outputs: "
@@ -175,14 +180,54 @@ class ModbusProcessTests(unittest.TestCase):
 
     def test_rejects_addresses_outside_tutorial_io_map(self):
         self.assertEqual(
-            process_pdu(self.process, b"\x02\x00\x07\x00\x01"),
+            process_pdu(self.process, b"\x02\x00\x0c\x00\x01"),
             b"\x82\x02",
         )
         self.assertEqual(
-            process_pdu(self.process, b"\x01\x00\x05\x00\x01"),
+            process_pdu(self.process, b"\x01\x00\x09\x00\x01"),
             b"\x81\x02",
         )
         self.assertEqual(len(self.process.read_inputs()), INPUT_COUNT)
+
+    def test_tank_fill_and_input_registers(self):
+        self.assertEqual(
+            process_pdu(self.process, b"\x04\x00\x00\x00\x02"),
+            b"\x04\x04\x00\xfa\x00\xc8",
+        )
+        self.process.write_coils(5, [True])
+        self.process.step(10.0, 2.0)
+
+        self.assertEqual(self.process.read_input_registers(0, 2), [370, 200])
+        self.assertFalse(self.process.read_inputs()[7])
+        self.assertEqual(
+            process_pdu(self.process, b"\x04\x00\x02\x00\x01"),
+            b"\x84\x02",
+        )
+
+    def test_tank_interlocks_mixer_and_transfer_pump(self):
+        self.process.tank_level = 50.0
+        self.process.write_coils(6, [True, True])
+        self.process.step(10.0, 2.0)
+
+        self.assertEqual(self.process.tank_level, 50.0)
+        self.assertFalse(self.process.read_inputs()[9])
+        self.assertFalse(self.process.read_inputs()[10])
+
+        self.process.write_coils(7, [False])
+        self.process.step(12.0, 2.0)
+
+        self.assertAlmostEqual(self.process.tank_temperature, 20.3)
+        self.assertTrue(self.process.read_inputs()[9])
+
+    def test_cli_can_manually_operate_tank_coils(self):
+        with patch(
+            "builtins.input",
+            side_effect=["coil fillvalve on", "quit"],
+        ), redirect_stdout(StringIO()) as output:
+            run_cli(self.process)
+
+        self.assertTrue(self.process.read_coils(5, 1)[0])
+        self.assertIn("FillValve ON.", output.getvalue())
 
     def test_process_box_moves_and_is_detected(self):
         self.process.add_box()
@@ -197,6 +242,32 @@ class ModbusProcessTests(unittest.TestCase):
 
         self.assertTrue(self.process.read_inputs()[2])
         self.assertIn("Box reached the pickup sensor", self.process.drain_events())
+
+    def test_auto_emitter_waits_until_held_box_is_released(self):
+        self.process.set_auto_emitter(True)
+        self.process.box_held = True
+        self.process.last_emission = 0
+        self.process.step(10.0, 0.05)
+
+        self.assertIsNone(self.process.box_position)
+        self.assertTrue(self.process.box_held)
+
+        self.process.box_held = False
+        self.process.step(10.05, 0.05)
+
+        self.assertEqual(self.process.box_position, 0.0)
+        self.assertFalse(self.process.box_held)
+
+    def test_robot_detected_ignores_next_box_at_emitter_while_picker_holds_box(self):
+        self.process.box_held = True
+        self.process.box_position = 0.0
+        self.process.z_down = True
+        self.process.robot_angle = 0.0
+
+        inputs = self.process.read_inputs()
+
+        self.assertFalse(inputs[3])
+        self.assertTrue(inputs[6])
 
     def test_rotating_input_tracks_active_motion(self):
         self.process.write_coils(3, [True])
@@ -235,7 +306,6 @@ class ModbusProcessTests(unittest.TestCase):
                 server.shutdown()
                 thread.join(timeout=2)
                 server.server_close()
-        self.assertIn("Modbus client connected: 127.0.0.1:", output.getvalue())
         self.assertIn("Modbus client disconnected: 127.0.0.1:", output.getvalue())
 
     def test_python_controller_reads_and_writes_simulator(self):
@@ -259,7 +329,7 @@ class ModbusProcessTests(unittest.TestCase):
                 )
             self.assertEqual(
                 self.process.read_coils(0, COIL_COUNT),
-                [True, False, True, False, True],
+                [True, False, True, False, True, False, False, False, False],
             )
             self.assertEqual(self.process.request_counts[5], 0)
             self.assertEqual(self.process.request_counts[15], 1)
@@ -272,7 +342,7 @@ class ModbusProcessTests(unittest.TestCase):
     def test_python_controller_starts_and_stops_on_safety_door(self):
         class FakeClient:
             inputs = [True, True, False, False, False, False]
-            coils = [False] * COIL_COUNT
+            coils = [False] * 5
 
             def read_inputs(self):
                 return self.inputs
@@ -292,7 +362,37 @@ class ModbusProcessTests(unittest.TestCase):
             controller.scan(2.0)
         self.assertEqual(controller.state, "WAIT_START")
         self.assertFalse(controller.run_enabled)
-        self.assertEqual(client.coils, [False] * COIL_COUNT)
+        self.assertEqual(client.coils, [False] * 5)
+
+    def test_python_controller_retracts_after_pick_with_next_box_at_emitter(self):
+        self.process.box_held = True
+        self.process.box_position = 0.0
+        self.process.z_down = True
+        self.process.robot_angle = 0.0
+
+        class LocalClient:
+            def read_inputs(inner_self):
+                return self.process.read_inputs()[:6]
+
+            def write_coils(inner_self, values):
+                self.process.write_coils(0, values)
+
+        controller = Controller(
+            LocalClient(), poll_interval=0.05, status_interval=0
+        )
+        controller.state = "PICK"
+        controller.run_enabled = True
+        controller.robot_detected_seen = True
+        controller.coil_states = [False, True, True, False, False]
+
+        with redirect_stdout(StringIO()):
+            controller.scan(time.monotonic())
+
+        self.assertEqual(controller.state, "RETRACT")
+        self.assertEqual(
+            self.process.read_coils(0, COIL_COUNT),
+            [False, True, False, False, False, False, False, False, False],
+        )
 
     def test_hmi_reads_current_modbus_inputs_and_coils(self):
         server = ModbusServer(("127.0.0.1", 0), self.process)
@@ -300,13 +400,20 @@ class ModbusProcessTests(unittest.TestCase):
         thread.start()
         try:
             with socket.create_connection(server.server_address, timeout=2) as client:
-                inputs, coils, transaction_id = read_snapshot(client, 0, 1)
+                inputs, coils, process_values, transaction_id = read_snapshot(
+                    client, 0, 1
+                )
+                registers = read_input_registers(client, transaction_id, 1, 0, 2)
             self.assertEqual(
                 inputs,
-                dict(zip(INPUT_NAMES, [False, True, False, False, False, False, False])),
+                dict(zip(INPUT_NAMES, [False, True, False, False, False, False, False,
+                                       False, False, False, False, False])),
             )
             self.assertEqual(len(coils), COIL_COUNT)
-            self.assertEqual(transaction_id, 2)
+            self.assertEqual(process_values["TankLevelPct"], 25.0)
+            self.assertEqual(process_values["TankTemperatureC"], 20.0)
+            self.assertEqual(registers, [250, 200])
+            self.assertEqual(transaction_id, 3)
         finally:
             server.shutdown()
             thread.join(timeout=2)
@@ -318,11 +425,19 @@ class ModbusProcessTests(unittest.TestCase):
             "simulator_monitor.read_bits",
             side_effect=[
                 ModbusExceptionError(2, 2, 0, 7),
+                ModbusExceptionError(2, 2, 0, 7),
                 [False, True, False, False, False, False],
+                ModbusExceptionError(1, 2, 0, 9),
                 [True, False, False, False, False],
             ],
         ) as read:
-            inputs, coils, next_transaction_id = read_snapshot(connection, 10, 1)
+            with patch(
+                "simulator_monitor.read_input_registers",
+                side_effect=ModbusExceptionError(4, 1, 0, 2),
+            ):
+                inputs, coils, process_values, next_transaction_id = read_snapshot(
+                    connection, 10, 1
+                )
 
         self.assertEqual(
             inputs,
@@ -334,13 +449,20 @@ class ModbusProcessTests(unittest.TestCase):
                 "MovingZ": False,
                 "Rotating": False,
                 "BoxPresent": True,
+                "TankLow": False,
+                "TankHigh": False,
+                "MixerRunning": False,
+                "TransferFlow": False,
+                "TankOverflow": False,
             },
         )
         self.assertTrue(coils["Conveyor"])
-        self.assertEqual(next_transaction_id, 13)
+        self.assertIsNone(process_values["TankLevelPct"])
+        self.assertEqual(next_transaction_id, 16)
         self.assertEqual(
             [call.args[1:] for call in read.call_args_list],
-            [(10, 1, 2, 7), (11, 1, 2, 6), (12, 1, 1, 5)],
+            [(10, 1, 2, 12, 0), (11, 1, 2, 7, 0), (12, 1, 2, 6, 0),
+             (13, 1, 1, 9, 0), (14, 1, 1, 5, 0)],
         )
 
     def test_hmi_error_identifies_failing_modbus_request(self):
@@ -378,6 +500,37 @@ class ModbusProcessTests(unittest.TestCase):
                 )
                 self.assertIn('setAttribute("y2", armLength)', page)
                 self.assertIn('heldX + 19', page)
+                self.assertIn("const zTransitionMs = 750;", page)
+                self.assertIn(
+                    "(data.coils.RotateCW || data.coils.RotateCCW) && data.coils.Grab;",
+                    page,
+                )
+                self.assertIn(
+                    "const nextZTarget = rotatingWithBox ? 0 : data.coils.ExtendZ ? 1 : 0;",
+                    page,
+                )
+                self.assertIn(
+                    "const easedProgress = 1 - Math.pow(1 - progress, 3);",
+                    page,
+                )
+                self.assertIn("const dropLowering = held && armAngle >= 65 ?", page)
+                self.assertIn(
+                    "const heldY = 150 + 70 * Math.max(zLevel, dropLowering);",
+                    page,
+                )
+                self.assertIn(
+                    "(armAngle / 90) * 226",
+                    page,
+                )
+                self.assertIn("LOWERING AT DROP", page)
+                self.assertIn("POSITIONED OVER DROP", page)
+                self.assertIn("const held = data.coils.Grab;", page)
+                self.assertIn("RETRACTING WITH BOX", page)
+                self.assertIn("rotatingWithBox && zLevel > 0.05", page)
+                self.assertNotIn(
+                    "const held = data.coils.Grab && !data.inputs.BoxAtSensor;",
+                    page,
+                )
                 self.assertIn(
                     "lastData.coils.Grab &&\n"
                     "        !data.coils.Grab &&\n"

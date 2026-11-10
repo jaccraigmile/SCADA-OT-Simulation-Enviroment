@@ -615,6 +615,72 @@ Upload** and **Play** to run on the vPLC. Uploading does not start the PLC.
    that match the HMI display. Save a PCAP only in the authorized lab
    workspace.
 
+### Ladder-to-Structured-Text recreation
+
+[`OPTION_A_LADDER_RECREATION.st`](./OPTION_A_LADDER_RECREATION.st) is the
+Structured Text body corresponding to the supplied ladder screenshots. The
+Autonomy Edge ST editor keeps declarations in its Variables Table, so add the
+variables there before pasting the file body into a Program POU. This follows
+the editor's [ST basics](https://edge.autonomylogic.com/docs/openplc-editor/programming-languages/structured-text/st-basics),
+[examples](https://edge.autonomylogic.com/docs/openplc-editor/programming-languages/structured-text/st-examples),
+and [editor workflow](https://edge.autonomylogic.com/docs/openplc-editor/programming-languages/structured-text/st-editor):
+
+| Class | Name | Type | Location / initial value |
+| --- | --- | --- | --- |
+| Local | `StartButton` | BOOL | `StartButton` |
+| Local | `SafetyDoor` | BOOL | `SafetyDoorClosed` |
+| Local | `BoxAtSensor` | BOOL | `BoxAtSensor` |
+| Local | `Picker_Holding_Box` | BOOL | `RobotDetected` |
+| Local | `Picker_Moving_Z` | BOOL | `MovingZ` |
+| Local | `Picker_Rotating` | BOOL | `Rotating` |
+| Local | `Box_Not_Waiting` | BOOL | `FALSE` (assigned in ST body) |
+| Local | `Conveyor_Move` | BOOL | `Conveyor` |
+| Local | `Picker_Grab` | BOOL | `Grab` |
+| Local | `Picker_Move_Down` | BOOL | `ExtendZ` |
+| Local | `Picker_Rotate_CW` | BOOL | `RotateCW` |
+| Local | `Picker_Rotate_CCW` | BOOL | `RotateCCW` |
+| Local | `Run` | BOOL | `FALSE` |
+| Local | `Picker_Holding_Box_Previous` | BOOL | `FALSE` |
+| Local | `Picker_Moving_Z_Previous` | BOOL | `FALSE` |
+| Local | `Picker_Rotating_Previous` | BOOL | `FALSE` |
+| Local | `Picker_Holding_Box_Rising` | BOOL | `FALSE` |
+| Local | `Picker_Moving_Z_Falling` | BOOL | `FALSE` |
+| Local | `Picker_Rotating_Falling` | BOOL | `FALSE` |
+
+The `.st` body implements the remaining N/P contacts as one-scan falling/rising
+edge pulses using previous-scan BOOL variables, and implements Set/Reset coils
+by assigning `TRUE` or `FALSE` only when their rungs fire. It also makes these
+corrections needed for the provided simulator: `Run` has a seal-in branch so a
+250 ms `StartButton` pulse is retained, `Box_Not_Waiting` is derived as
+`NOT BoxAtSensor`, and pickup uses the active `BoxAtSensor` level rather than
+an edge pulse. The level condition ensures the picker starts if the PLC starts
+after a box has already reached the sensor.
+
+In the variable table screenshot, the safety input location appears as
+`SaftyDoorClose`. That does not match the simulator's exact input alias
+`SafetyDoorClosed`; correct the remote-device alias/location in the editor.
+If the safety input is false or unresolved, the seal-in rung intentionally
+drops `Run`.
+
+With `BoxAtSensor=ON`, `Run=ON`, and `Picker_Holding_Box=OFF`, the expected
+outputs are `Conveyor_Move=OFF`, `Picker_Move_Down=ON`, and `Picker_Grab=ON`.
+If the simulator reports `BoxAtSensor=ON` while the PLC continues writing
+`Conveyor=ON`, verify the PLC's live values for those three variables and that
+the uploaded program and FC 2 offset-2 alias are current. The simulator's
+status command reports its actual coil state; use it alongside the OpenPLC
+live variable table to distinguish a stale log line from a current write.
+
+Each FC 15 packet is a real Modbus Write Multiple Coils request. The simulator
+logs every request, even when it writes the same coil values as the preceding
+request. The all-OFF values shown in the controller log mean it is actively
+commanding all five outputs OFF; they are not merely read responses or proof
+that an actuator changed state. Repeated FC 15 packets indicate the OpenPLC
+output group is issuing repeated writes. Set that group's cycle time to at
+least 100 ms (the setup above uses 100 ms) to limit traffic. Do not slow the
+PLC task itself to fix Modbus traffic; that changes edge detection and process
+response timing. Confirm the write interval from packet timestamps in
+Wireshark.
+
 ## Option B — Python Modbus/TCP controller
 
 This option replaces the OpenPLC Runtime on the PLC-LAB side with a small

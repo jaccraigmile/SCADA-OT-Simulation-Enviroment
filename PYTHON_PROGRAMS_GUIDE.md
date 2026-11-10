@@ -31,8 +31,8 @@ firewall, guest networking, or Proxmox configuration.
 ### Purpose and entry point
 
 This is the process model and Modbus/TCP server. It replaces the Factory I/O
-scene with an in-memory conveyor, box, picker, and simulated safety-door
-input. Run it on the simulator guest:
+scene with an in-memory conveyor/picker line, a batch tank, and a simulated
+safety-door input. Run it on the simulator guest:
 
 ```bash
 python3 factoryio_simulator.py --host 0.0.0.0 --port 502 --unit-id 1
@@ -51,22 +51,27 @@ used by the systemd service for remote-managed Option B deployments.
 - The simulated safety-door state and temporary start-button pulse.
 - Box position, whether the picker holds a box, and the removed-box count.
 - Automatic-emitter state and timing.
-- Five actuator coil values.
+- Nine actuator coil values covering the conveyor/picker line and tank skid.
+- Tank level and temperature, plus derived tank-level and equipment inputs.
 - Picker extension state, active rotation direction, and transition timing.
 - A bounded event queue and Modbus function-code request counts.
 
 A thread lock protects shared state because the Modbus server, simulation
 loop, reset handler, and terminal interface can access it concurrently.
 
-`read_inputs()` derives seven discrete-input values from this state, including
-`BoxPresent` so the HMI can distinguish an actual box from an energized
-conveyor with no box. The default conveyor speed takes about 6.7 seconds to
-reach the pickup sensor; a full picker rotation takes about 1.6 seconds.
-`read_coils()` and `write_coils()` access the five output values; writes also
-record output-change events. `step()` advances the process by one simulation
-tick. It handles automatic box emission, pauses physical-model motion while
-the safety door is open, moves the picker, picks/releases boxes, and advances
-the conveyor. The `run_simulation()` loop calls it about every 50 ms.
+`read_inputs()` derives twelve discrete-input values, including `BoxPresent`,
+tank-level switches, mixer/transfer feedback, and an overflow switch.
+`read_input_registers()` exposes tank level and temperature in tenths of a
+unit. The default conveyor speed takes about 6.7 seconds to reach the pickup
+sensor; a full picker rotation takes about 1.6 seconds.
+`read_coils()` and `write_coils()` access the nine outputs; writes also record
+output-change events. `step()` advances the process by one simulation tick. It
+handles automatic box emission, pauses process motion while the safety door
+is open, moves the picker, and advances the conveyor and tank equipment. Tank
+fill/drain rates and the mixer/transfer interlock are modeled in the same
+process step. The automatic emitter waits until a box is not on the conveyor
+and is not being held by the picker before releasing the next box. The
+`run_simulation()` loop calls it about every 50 ms.
 
 `reset()` restores the in-memory process to its startup baseline: door closed,
 no active start pulse, no box, no held box, zero removed count, automatic
@@ -74,9 +79,9 @@ emitter enabled, all coils off, picker retracted/home, and cleared event and
 request counters. It also restarts the automatic-emitter timer.
 
 The display methods `status()` and `live_status()` format the current
-signals and process state for the terminal. The model's continuous values,
-such as exact position and angle, are internal; they are not exposed in the
-Modbus map.
+signals and process state for the terminal. Exact box position and picker
+angle remain internal; tank level and temperature are exposed at tenths
+resolution through the input-register map.
 
 ### Modbus/TCP protocol code
 
@@ -85,6 +90,7 @@ payloads:
 
 - FC 01 reads output coils.
 - FC 02 reads discrete inputs.
+- FC 04 reads tank level and temperature input registers.
 - FC 05 writes one coil.
 - FC 15 writes multiple coils.
 
@@ -104,10 +110,11 @@ source and documented lab default Modbus port is `502`.
 ### Terminal and reset HTTP interfaces
 
 `run_cli()` accepts `start`, `box`, `door open`, `door close`, `auto on`,
-`auto off`, `reset`, `status`, `help`, and `quit`. Process events are retained
-in memory for the model but are not automatically printed. Valid FC 15
-output-write requests are printed as they arrive. The `status` command prints
-a process snapshot only when requested.
+`auto off`, `coil <name> on|off`, `reset`, `status`, `help`, and `quit`.
+Named coil commands manually operate any output, including the tank equipment.
+Process events are retained in memory for the model but are not automatically
+printed. Valid FC 15 output-write requests are printed as they arrive. The
+`status` command prints a process snapshot only when requested.
 
 `ResetServer` is a separate HTTP server bound specifically to
 `127.0.0.1`, default port `8081`. Its `GET /health` checks readiness;
@@ -146,10 +153,12 @@ function code. It recognizes Modbus exception responses and closes the
 connection when transport or validation errors occur.
 
 `read_inputs()` uses FC 02 to read the six controller input bits. The HMI
-also reads the seventh `BoxPresent` input. `write_coils()` uses FC 15 to send
-the complete five-coil output state in one request and validates the response
-address and quantity. `write_all_coils_off()` uses this same FC 15 operation
-to establish a known output state on startup and during normal shutdown.
+reads the full process map, including the additional tank signals, and tank
+telemetry via FC 04. `write_coils()` uses FC 15 to send the complete
+five-coil conveyor/picker output state in one request and validates the
+response address and quantity. `write_all_coils_off()` uses this same FC 15
+operation to establish a known state for the controller-managed outputs on
+startup and during normal shutdown.
 `Controller.set_outputs()` sends a request only when at least one output
 changes, keeping the five actuator values synchronized as a single update.
 
@@ -228,6 +237,16 @@ process position and box count are not available through the current Modbus
 map. Because a new box may be emitted before the
 next HMI poll after a drop, the animation also resets its conveyor position
 when the gripper releases a box at the drop point.
+The Z-axis animation interpolates the `ExtendZ` coil over the simulator's
+750 ms actuator transition with easing, moving a held box down to pick and
+up during retraction rather than switching its displayed height immediately.
+While the gripper output is on, the box remains attached to the gripper even
+if the pickup sensor input changes. If rotation begins while a box is held,
+the animation continues toward the retracted height, and the picker status
+continues to show retraction until the box is visibly raised. This avoids
+showing the carried box at the drop platform before it is released. During the
+last part of the swing, the held box lowers onto the drop platform; its final
+position is centered over the platform before the gripper releases it.
 
 The standalone controller retains its 50 ms scan interval by default. This is
 the control loop, not display polling; increasing it could delay input and
