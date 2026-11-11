@@ -30,6 +30,15 @@ reset helper sends a local HTTP request to the simulator process; it does not
 communicate through Modbus and does not change controller or network
 configuration.
 
+The project also includes a lab-only packet-injection helper and a remote
+service-control helper. `injectionv2.py` captures a valid Modbus/TCP write to
+coils, validates the frame structure, and then sends a crafted `FC 15` packet
+with a matching transaction ID to exercise packet-forgery and detection
+topics in the isolated lab. It uses Scapy and should only be run against the
+training network. `start_option_b_from_kali.sh` is a bash automation wrapper
+that starts, stops, or checks the simulator and controller systemd services
+from Kali after SSHing to the lab guests.
+
 ## `factoryio_simulator.py`
 
 ### Purpose and entry point
@@ -335,6 +344,22 @@ Run the suite from the project directory:
 ```bash
 python3 -m unittest -v test_factoryio_simulator.py
 ```
+
+## Supporting utility scripts
+
+`injectionv2.py` is a Scapy-based Modbus/TCP packet-capture and injection
+utility used during the lab exercises that inspect forged write requests.
+The script listens for a valid coil-write exchange, confirms the Modbus frame
+fields and coil count, and then transmits a crafted FC 15 packet with the same
+TCP metadata. This is a training-focused helper for lab traffic analysis and
+packet validation; it is not a production component and should never be used
+outside the isolated OT lab.
+
+`start_option_b_from_kali.sh` is a convenience wrapper for starting and checking
+Option B services from a Kali control host. It uses SSH to call
+`systemctl` on the simulator and controller guests, allowing a single command
+to bring up or inspect the Controller and Simulator services without explicit
+remote shell steps.
 
 ## Suggested reading order
 
