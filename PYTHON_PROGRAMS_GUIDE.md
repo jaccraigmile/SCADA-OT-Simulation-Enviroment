@@ -8,7 +8,7 @@ is required by the current source.
 ## How the programs fit together
 
 ```text
-                    Control VM (Option B)
+                    Windows Control VM (Option B)
                    /                   \
       HTTP operator API             Modbus/TCP
                  |                       |
@@ -22,7 +22,7 @@ over Modbus/TCP. reset_lab_process.py uses the simulator's loopback-only HTTP
 reset endpoint.
 ```
 
-In Option B, the Control VM HMI commands controller start/stop over its
+In Option B, the Windows Control VM HMI commands controller start/stop over its
 authenticated operator API and reads/writes the simulated process over
 Modbus/TCP. Its tank controls address only tank coils; the controller owns the
 line coils. `simulator_monitor.py` remains a separate read-only HMI. The
@@ -212,19 +212,30 @@ explicitly.
 
 ## `optionb_control_hmi.py`
 
-This is the interactive Option B operator station intended for the Control
-VM. It binds to loopback on port `8083`, polls controller/API status and the
-simulator Modbus map, and displays the production state, RTU signals, and tank
-telemetry. Its Start/Stop buttons control the Python controller's run-enable
-state. Tank buttons write only FC 05 coils 5–8; they do not write the
-controller-managed line outputs at addresses 0–4.
+This is the interactive Option B operator station intended for the Windows
+Control VM. It binds to loopback on port `8083`, polls controller/API status and
+the simulator Modbus map, and displays the production state, RTU signals, and
+tank telemetry. Its Start/Stop buttons control the Python controller's
+run-enable state. Tank buttons write only FC 05 coils 5–8; they do not write
+the controller-managed line outputs at addresses 0–4.
 
 The HMI acts as a local web proxy: its server-side requests use a bearer token
 to call the controller API and a separate Modbus/TCP connection for plant
 telemetry and tank coil commands. The token is read from
 `FACTORYIO_CONTROL_TOKEN`; it is never sent to the browser. The HMI is bound
-to loopback by default and rejects non-loopback web binds. It is an operator
-training interface, not a safety-rated controller or physical-process HMI.
+to loopback by default and rejects non-loopback web binds. It runs on the
+Windows Control VM as a training interface, not as a safety-rated controller or
+physical-process HMI.
+
+On Windows, set `FACTORYIO_CONTROL_TOKEN` in the PowerShell process used to
+launch the HMI, then run it from the project directory:
+
+```powershell
+py -3 .\optionb_control_hmi.py --modbus-host 10.77.20.10 --modbus-port 502 --unit-id 1 --controller-api http://10.77.10.10:8082 --host 127.0.0.1 --port 8083
+```
+
+See the environment setup guide for the secure token prompt and complete
+Windows launch steps.
 
 ## `simulator_monitor.py`
 

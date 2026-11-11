@@ -14,8 +14,8 @@ common to both options. Choose one controller path for a lab run:
 
 | Option | Controller | What you will do |
 | --- | --- | --- |
-| **Option A — OpenPLC Runtime v4** | OpenPLC Runtime v4 plus a Control VM running the OpenPLC Editor | Configure a Modbus Remote Device, deploy a Structured Text program, and observe how PLC logic reads inputs and controls outputs. |
-| **Option B — Python Modbus/TCP** | A Debian/Ubuntu controller LXC and a Control VM running the operator HMI | The Control VM starts/stops the Python controller and operates the simulated tank. No OpenPLC Runtime or Editor is required. |
+| **Option A — OpenPLC Runtime v4** | OpenPLC Runtime v4 plus a Windows Control VM running the OpenPLC Editor | Configure a Modbus Remote Device, deploy a Structured Text program, and observe how PLC logic reads inputs and controls outputs. |
+| **Option B — Python Modbus/TCP** | A Debian/Ubuntu controller LXC and a Windows Control VM running the operator HMI | The Windows Control VM starts/stops the Python controller and operates the simulated tank. No OpenPLC Runtime or Editor is required. |
 
 Option A is the PLC-based path and the primary route for learning how an
 industrial controller and its engineering workstation interact in an
@@ -42,7 +42,7 @@ Both options use these shared components:
 
 The same simulator, Kali gateway/capture host, read-only monitor, and Modbus
 I/O map are used in both options. The selected controller is a Modbus client.
-Option B additionally has an interactive operator HMI on its Control VM.
+Option B additionally has an interactive operator HMI on its Windows Control VM.
 
 ## Shared Kali gateway, capture, and HMI setup
 
@@ -703,7 +703,7 @@ Modbus server. Keep Kali between the controller and simulator:
                  |                                      |
              PLC-LAB VNet                           SIM-LAB VNet
        /                 \                             |
-Control VM          Python controller LXC         Simulator LXC
+Windows Control VM  Python controller LXC         Simulator LXC
 10.77.10.20/24          10.77.10.10/24              10.77.20.10/24
 ```
 
@@ -728,12 +728,16 @@ a direct controller-to-simulator interface or bypass route.
 
 1. Create a Debian/Ubuntu LXC named `python-controller` and attach its NIC to
    `PLC-LAB`. Configure `10.77.10.10/24` with default gateway `10.77.10.1`.
-   Create/attach the Option B Control VM to `PLC-LAB` at `10.77.10.20/24`, gateway
-   `10.77.10.1`. Do not reuse the Option A Control VM's `MGMT` address for
-   this interface.
+   Create/attach the Option B Windows Control VM to `PLC-LAB` at
+   `10.77.10.20/24`, gateway `10.77.10.1`. Do not reuse the Option A Control
+   VM's `MGMT` address for this interface.
 2. Install Python 3.10 or newer and `openssh-server` in the simulator and
-   controller containers. Install Python 3.10 or newer on the Control VM.
-   In each LXC, install Python and SSH and prepare the service account:
+   controller containers. On the Windows Control VM, install Python 3.10 or
+   newer, copy the repository to a working directory, and keep its browser and
+   local Python environment accessible to the operator. The Linux service files
+   in this repo are not the default Control VM launch method.
+
+   In each Linux LXC, install Python and SSH and prepare the service account:
 
    ```bash
    sudo apt-get update
@@ -744,60 +748,80 @@ a direct controller-to-simulator interface or bypass route.
    sudo systemctl enable --now ssh
    ```
 
-   On the Control VM, install Python 3 and create the `otlab` service account:
+   On the Windows Control VM, install Python 3 and copy the project files to a
+   local directory such as `C:\FactoryIO` or a work folder on the VM. The
+   Windows operator runs `optionb_control_hmi.py` by opening a PowerShell window
+   in that directory and launching the script with Python. Stop any copies
+   currently running in terminals before starting the HMI again.
 
-   ```bash
-   sudo apt-get update
-   sudo apt-get install -y python3
-   sudo useradd --create-home --shell /bin/bash otlab
-   sudo passwd otlab
-   sudo install -d -o otlab -g otlab /opt/factoryio
-   ```
+   Transfer these source files from the repository to the Linux guests using
+   the Proxmox console or an approved file-transfer method. The destination
+   directory `/opt/factoryio` was created above:
 
-   Copy the project files to `/opt/factoryio` in the relevant guest, owned by
-   `otlab`: simulator and reset files to the simulator LXC; controller file
-   to the controller LXC; `optionb_control_hmi.py` and
-   `simulator_monitor.py` to the Control VM. Stop any copies currently
-   running in terminals before moving to the service-managed setup.
-3. Install the matching service unit from this repository:
+   | Guest | Files to install in `/opt/factoryio` |
+   | --- | --- |
+   | Simulator LXC | `factoryio_simulator.py`, `reset_lab_process.py` |
+   | Controller LXC | `factoryio_modbus_controller.py` |
+
+   Set each source file's owner to `otlab:otlab` and ensure it is readable by
+   that account. The Windows Control VM needs both `optionb_control_hmi.py`
+   and `simulator_monitor.py` in the same local directory because the HMI
+   imports the monitor module.
+3. Install the matching service unit from this repository for the Linux
+   guests only:
 
    - Simulator LXC: copy `systemd/factoryio-simulator.service` to
      `/etc/systemd/system/factoryio-simulator.service`.
    - Controller LXC: copy `systemd/factoryio-controller.service` to
      `/etc/systemd/system/factoryio-controller.service`.
-   - Control VM: copy `systemd/optionb-control-hmi.service` to
-     `/etc/systemd/system/optionb-control-hmi.service`.
 
-   Then run `sudo systemctl daemon-reload` in each guest. Generate a strong
-   random API token on a trusted administration workstation:
+   Transfer each unit file from the repository to its guest, install it at
+   the destination shown above, then run `sudo systemctl daemon-reload` in
+   both Linux guests. Enable each service so it starts after a guest reboot:
+
+   ```bash
+   sudo systemctl enable factoryio-simulator.service
+   ```
+
+   Run the corresponding command in the controller LXC:
+
+   ```bash
+   sudo systemctl enable factoryio-controller.service
+   ```
+
+   The Windows Control VM does not use `systemd`; launch
+   `optionb_control_hmi.py` from PowerShell as shown below. Generate
+   a strong random API token on a trusted administration workstation:
 
    ```bash
    openssl rand -hex 32
    ```
 
-   Securely enter the same generated value in `/etc/factoryio/controller.env`
-   on the controller and `/etc/factoryio/control-hmi.env` on the Control VM.
-   Each file contains the single line `FACTORYIO_CONTROL_TOKEN=<generated-value>`.
-   On each guest, create the directory and edit the appropriate file:
+   Store the generated value in `/etc/factoryio/controller.env` on the
+   controller LXC. The Windows HMI does not use or need
+   `/etc/factoryio/control-hmi.env`; its token is entered into the PowerShell
+   process when launching it, as shown in step 9. On the controller LXC, create
+   the directory and edit its environment file with the same generated token
+   on a line like `FACTORYIO_CONTROL_TOKEN=<generated-value>`:
 
    ```bash
    sudo install -d -o root -g otlab -m 0750 /etc/factoryio
    sudoedit /etc/factoryio/controller.env
    ```
 
-   On the Control VM, use `/etc/factoryio/control-hmi.env` with `sudoedit`.
-   Set each file's owner/group to `root:otlab` and mode to `0640`, for example:
+   Set the Linux controller file's owner/group to `root:otlab` and mode to
+   `0640`:
 
    ```bash
    sudo chown root:otlab /etc/factoryio/controller.env
    sudo chmod 0640 /etc/factoryio/controller.env
    ```
 
-   Run the matching commands for `control-hmi.env` on the Control VM. Keep
-   the token out of shell history, source files, and screenshots. The controller API
-   listens on `10.77.10.10:8082`; its bearer token is sent over HTTP, so keep
-   the PLC-LAB isolated and permit that port only from `10.77.10.20`.
-   The HMI itself binds to Control VM loopback at `127.0.0.1:8083`.
+   Keep the token out of source files and screenshots. The controller API
+   listens on `10.77.10.10:8082`; its bearer token is sent
+   over HTTP, so keep the PLC-LAB isolated and permit that port only from
+   `10.77.10.20`. The HMI itself binds to the Windows Control VM loopback at
+   `127.0.0.1:8083`.
 
    The simulator
    unit runs as `otlab` and receives only `CAP_NET_BIND_SERVICE` to bind TCP
@@ -845,10 +869,16 @@ a direct controller-to-simulator interface or bypass route.
    (`10.77.10.20`) using its host firewall. For example, with UFW:
 
    ```bash
+   sudo ufw default deny incoming
+   sudo ufw allow from 10.77.10.1 to any port 22 proto tcp
    sudo ufw allow from 10.77.10.20 to any port 8082 proto tcp
+   sudo ufw enable
+   sudo ufw status numbered
    ```
 
-   Ensure the host firewall denies TCP `8082` from every other source.
+   Review existing rules before enabling UFW on a guest; do not overwrite
+   another firewall policy. Ensure no broader allow rule permits TCP `8082`
+   from other sources. Keep SSH ingress limited to Kali as described above.
    On Kali, copy `start_option_b_from_kali.sh` from this repository and make
    it executable with `chmod +x start_option_b_from_kali.sh`. Test both
    targets with the dedicated key:
@@ -886,19 +916,37 @@ a direct controller-to-simulator interface or bypass route.
    sudo tcpdump -ni any '(host 10.77.10.10 or host 10.77.10.20) and host 10.77.20.10 and tcp port 502'
    ```
 
-8. From the controller LXC and Control VM, verify route and TCP reachability:
+8. From the controller LXC and the Windows Control VM, verify route and TCP reachability:
+
+   On Linux:
 
    ```bash
    ip route get 10.77.20.10
    nc -vz -w 3 10.77.20.10 502
    ```
 
-   The route must go through `10.77.10.1` and the TCP connection must succeed.
-9. From the Control VM, start the HMI service and open it locally:
+   On Windows PowerShell:
 
-   ```bash
-   sudo systemctl enable --now optionb-control-hmi.service
+   ```powershell
+   route print
+   Test-NetConnection 10.77.20.10 -Port 502
    ```
+
+   The route must go through `10.77.10.1` and the TCP connection must succeed.
+9. On the Windows Control VM, launch the operator HMI from a PowerShell session
+   in the project directory:
+
+   ```powershell
+   $secureToken = Read-Host "Controller API token" -AsSecureString
+   $env:FACTORYIO_CONTROL_TOKEN = [System.Net.NetworkCredential]::new("", $secureToken).Password
+   Set-Location C:\FactoryIO
+   py -3 .\optionb_control_hmi.py --modbus-host 10.77.20.10 --modbus-port 502 --unit-id 1 --controller-api http://10.77.10.10:8082 --host 127.0.0.1 --port 8083
+   ```
+
+   Replace `C:\FactoryIO` if you chose a different project directory. The
+   token prompt is required in each new PowerShell session; the HMI reads the
+   token from its process environment. Keep this PowerShell window open while
+   using the HMI.
 
    Open `http://127.0.0.1:8083/` in the Control VM browser. The HMI shows
    controller state and RTU signals; Start and Stop operate the controller
@@ -910,10 +958,10 @@ a direct controller-to-simulator interface or bypass route.
     PLC-LAB interface:
 
     ```bash
-   set -a
-   source /etc/factoryio/controller.env
-   set +a
-   python3 factoryio_modbus_controller.py --host 10.77.20.10 --port 502 --unit-id 1 --control-host 10.77.10.10 --control-port 8082
+    set -a
+    source /etc/factoryio/controller.env
+    set +a
+    python3 factoryio_modbus_controller.py --host 10.77.20.10 --port 502 --unit-id 1 --control-host 10.77.10.10 --control-port 8082
     ```
 
     It remains stopped until a Start request reaches its API; a simulator

@@ -1,0 +1,19 @@
+[Unit]
+Description=Option B Python Modbus/TCP controller
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=otlab
+Group=otlab
+EnvironmentFile=/etc/factoryio/controller.env
+WorkingDirectory=/opt/factoryio
+ExecStart=/usr/bin/python3 /opt/factoryio/factoryio_modbus_controller.py --host 10.77.20.10 --port 502 --unit-id 1 --control-host 10.77.10.10 --control-port 8082
+KillSignal=SIGINT
+TimeoutStopSec=15
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

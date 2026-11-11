@@ -1,0 +1,18 @@
+[Unit]
+Description=Option B interactive operator HMI
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=otlab
+Group=otlab
+EnvironmentFile=/etc/factoryio/control-hmi.env
+WorkingDirectory=/opt/factoryio
+ExecStart=/usr/bin/python3 /opt/factoryio/optionb_control_hmi.py --modbus-host 10.77.20.10 --modbus-port 502 --unit-id 1 --controller-api http://10.77.10.10:8082 --host 127.0.0.1 --port 8083
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

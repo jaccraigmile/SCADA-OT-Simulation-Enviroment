@@ -22,7 +22,7 @@ by the current code.
 | [factoryio_simulator.py](./factoryio_simulator.py) | Process model and Modbus/TCP server. Models the conveyor/picker line and a batch tank with fill, mix, transfer, and drain equipment; prints every valid FC 15 write with named output states. |
 | [factoryio_modbus_controller.py](./factoryio_modbus_controller.py) | Option B Python Modbus/TCP client/controller. Runs a pick-and-place sequence without OpenPLC. |
 | [optionb_control_hmi.py](./optionb_control_hmi.py) | Interactive, loopback-only Option B operator HMI. Starts/stops the Python controller and operates the simulated tank equipment. |
-| [systemd/optionb-control-hmi.service](./systemd/optionb-control-hmi.service) | Control VM service for the interactive Option B operator HMI. |
+| [systemd/optionb-control-hmi.service](./systemd/optionb-control-hmi.service) | Optional Linux service unit for deployments that run the Option B HMI on Linux; the lab's Windows Control VM runs it from PowerShell. |
 | [OPTION_A_LADDER_RECREATION.st](./OPTION_A_LADDER_RECREATION.st) | Structured Text body reproducing the supplied OpenPLC ladder rungs; variable-table setup and behavioral caveats are in the environment guide. |
 | [start_option_b_from_kali.sh](./start_option_b_from_kali.sh) | Starts, stops, restarts, or checks the Option B simulator and controller services remotely from Kali over SSH. |
 | [simulator_monitor.py](./simulator_monitor.py) | Browser-based, read-only HMI. Polls simulator inputs, coils, and input registers; displays line signals, inferred motion, tank level, and temperature. |
@@ -60,14 +60,15 @@ Choose one controller path for a run:
   deploys the program to the Runtime over the management network.
 - **Option B — Python Modbus/TCP:** Run
   [factoryio_modbus_controller.py](./factoryio_modbus_controller.py) in a
-  controller container and the Control VM hosting
+  controller container and the Windows Control VM hosting
   [optionb_control_hmi.py](./optionb_control_hmi.py) instead of OpenPLC
   Runtime or Editor.
 
-The Option B Control VM HMI starts and stops the controller's production
+The Windows Control VM HMI starts and stops the controller's production
 sequence through its restricted operator API and can operate the simulator's
 batch-tank coils. The controller service itself remains running until stopped
-by the service manager.
+by the service manager on the controller guest. The HMI is not a Linux systemd
+service in the default lab deployment; it runs as a Windows local app or task.
 
 The [environment setup guide](./OT_SCADA_ENVIRONMENT_SETUP.md) contains the
 network diagrams, IP plan, Kali routing/NAT and capture guidance, and
@@ -76,8 +77,8 @@ simultaneously against the same simulator.
 
 The [simulator monitor](./simulator_monitor.py) is read-only and binds to
 localhost by default. Option B also has a separate interactive operator HMI
-on its Control VM for controller Start/Stop and tank controls. Both are
-training interfaces, not safety-rated control systems.
+on its Windows Control VM for controller Start/Stop and tank controls. Both
+are training interfaces, not safety-rated control systems.
 
 ## Process model and Modbus map
 
