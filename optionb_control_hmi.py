@@ -23,6 +23,9 @@ TANK_COILS = {
     "DrainValve": 8,
 }
 
+# Set only in a private local copy; never commit a real token.
+HARDCODED_CONTROL_TOKEN = ""
+
 PAGE = """<!doctype html>
 <html lang="en">
 <head>
@@ -492,8 +495,11 @@ def main() -> None:
     parser.add_argument("--timeout", type=float, default=2.0)
     parser.add_argument(
         "--control-token",
-        default=os.environ.get("FACTORYIO_CONTROL_TOKEN"),
-        help="controller API bearer token; may also use FACTORYIO_CONTROL_TOKEN",
+        default=HARDCODED_CONTROL_TOKEN or os.environ.get("FACTORYIO_CONTROL_TOKEN"),
+        help=(
+            "controller API bearer token; may also use FACTORYIO_CONTROL_TOKEN "
+            "or HARDCODED_CONTROL_TOKEN"
+        ),
     )
     args = parser.parse_args()
     if not 1 <= args.modbus_port <= 65535 or not 1 <= args.port <= 65535:
@@ -503,7 +509,10 @@ def main() -> None:
     if args.timeout <= 0:
         parser.error("--timeout must be positive")
     if not args.control_token:
-        parser.error("set --control-token or FACTORYIO_CONTROL_TOKEN")
+        parser.error(
+            "set --control-token, FACTORYIO_CONTROL_TOKEN, or "
+            "HARDCODED_CONTROL_TOKEN in optionb_control_hmi.py"
+        )
     if args.host not in ("127.0.0.1", "::1", "localhost"):
         parser.error("the operator HMI must bind to loopback; use it on the Control VM")
 
