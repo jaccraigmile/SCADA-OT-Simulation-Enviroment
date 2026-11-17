@@ -251,6 +251,7 @@ PAGE = """<!doctype html>
 
 
 def receive_exactly(connection: socket.socket, length: int) -> bytes:
+    """Read the exact Modbus payload length from a socket stream."""
     data = bytearray()
     while len(data) < length:
         chunk = connection.recv(length - len(data))
@@ -263,6 +264,7 @@ def receive_exactly(connection: socket.socket, length: int) -> bytes:
 def read_process(
     host: str, port: int, unit_id: int, timeout: float
 ) -> dict[str, Any]:
+    """Read the current Modbus inputs, coils, and tank values from the simulator."""
     with socket.create_connection((host, port), timeout=timeout) as connection:
         connection.settimeout(timeout)
         inputs, coils, process, _ = read_snapshot(connection, 0, unit_id)
@@ -281,6 +283,7 @@ def write_tank_coil(
     name: str,
     enabled: bool,
 ) -> None:
+    """Toggle a tank coil by writing a single Modbus FC 05 coil command."""
     address = TANK_COILS[name]
     value = 0xFF00 if enabled else 0
     pdu = struct.pack(">BHH", 5, address, value)
@@ -300,7 +303,10 @@ def write_tank_coil(
 
 
 class ControllerAPIError(RuntimeError):
+    """Represent a failed controller API request with its HTTP status code."""
+
     def __init__(self, status: int, message: str) -> None:
+        """Capture the controller API error code and human-readable failure message."""
         self.status = status
         super().__init__(message)
 
@@ -312,6 +318,7 @@ def controller_request(
     method: str = "GET",
     timeout: float = 2.0,
 ) -> dict[str, Any]:
+    """Send an authenticated request to the controller operator API and return JSON."""
     request = Request(
         base_url.rstrip("/") + path,
         method=method,
@@ -344,8 +351,13 @@ def make_handler(
     controller_api: str,
     token: str,
 ) -> type[BaseHTTPRequestHandler]:
+    """Build the browser-backed operator HMI that proxies controller and tank commands."""
+
     class OperatorHMIHandler(BaseHTTPRequestHandler):
+        """Serve the browser UI and route operator actions to Modbus and controller APIs."""
+
         def _respond(self, status: int, payload: dict[str, Any] | str, content_type: str) -> None:
+            """Send a JSON or HTML payload with the HMI response headers."""
             content = (
                 payload.encode("utf-8")
                 if isinstance(payload, str)
@@ -361,12 +373,14 @@ def make_handler(
             self.wfile.write(content)
 
         def _controller_action(self, action: str) -> None:
+            """Send a controller start/stop request to the control API."""
             payload = controller_request(
                 controller_api, token, f"/api/{action}", "POST", timeout
             )
             self._respond(200, payload, "application/json; charset=utf-8")
 
         def do_GET(self) -> None:
+            """Serve the HMI page or the aggregated controller/process status payload."""
             if self.path == "/":
                 self._respond(200, PAGE, "text/html; charset=utf-8")
                 return
@@ -397,6 +411,7 @@ def make_handler(
             )
 
         def do_POST(self) -> None:
+            """Handle controller commands and tank-coil writes from the operator UI."""
             expected_origin = (
                 f"http://{self.server.server_address[0]}:"
                 f"{self.server.server_address[1]}"
@@ -470,17 +485,21 @@ def make_handler(
             )
 
         def log_message(self, _format: str, *_args: object) -> None:
+            """Silence the default web server request log for operator HMI traffic."""
             del _format, _args
 
     return OperatorHMIHandler
 
 
 class OperatorHMIServer(ThreadingHTTPServer):
+    """HTTP server that hosts the local Operator HMI for the Option B flow."""
+
     daemon_threads = True
     allow_reuse_address = True
 
 
 def main() -> None:
+    """Start the local Option B operator HMI and bind it to the Control VM loopback address."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--modbus-host", default="10.77.20.10")
     parser.add_argument("--modbus-port", type=int, default=502)

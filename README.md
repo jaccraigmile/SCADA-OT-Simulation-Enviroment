@@ -23,15 +23,27 @@ by the current code.
 | [factoryio_modbus_controller.py](./factoryio_modbus_controller.py) | Option B Python Modbus/TCP client/controller. Runs a pick-and-place sequence without OpenPLC. |
 | [optionb_control_hmi.py](./optionb_control_hmi.py) | Interactive, loopback-only Option B operator HMI. Starts/stops the Python controller and operates the simulated tank equipment. |
 | [systemd/optionb-control-hmi.service](./systemd/optionb-control-hmi.service) | Optional Linux service unit for deployments that run the Option B HMI on Linux; the lab's Windows Control VM runs it from PowerShell. |
+| [systemd/simulator-monitor.service](./systemd/simulator-monitor.service) | Starts the shared read-only simulator HMI on Kali at boot. |
 | [OPTION_A_LADDER_RECREATION.st](./OPTION_A_LADDER_RECREATION.st) | Structured Text body reproducing the supplied OpenPLC ladder rungs; variable-table setup and behavioral caveats are in the environment guide. |
 | [start_option_b_from_kali.sh](./start_option_b_from_kali.sh) | Starts, stops, restarts, or checks the Option B simulator and controller services remotely from Kali over SSH. |
 | [simulator_monitor.py](./simulator_monitor.py) | Browser-based, read-only HMI. Polls simulator inputs, coils, and input registers; displays line signals, inferred motion, tank level, and temperature. |
 | [reset_lab_process.py](./reset_lab_process.py) | Starts or resets the simulator process through its loopback-only control endpoint. |
+| [injectionv2.py](./injectionv2.py) | Lab-only Scapy helper that captures, validates, and inspects a Modbus/TCP FC 15 write frame on the isolated training network; it is not part of the active simulator/controller workflow. |
 | [test_factoryio_simulator.py](./test_factoryio_simulator.py) | Unit and integration tests for the simulator, controller communication, HMI, and reset behavior. |
 
 See the [Python programs guide](./PYTHON_PROGRAMS_GUIDE.md) for explanations
 of each program's structure, important functions and classes, Modbus/TCP and
 HTTP data flow, run commands, and test coverage.
+
+For the lab-only Scapy helper on the Kali router, run:
+
+```bash
+sudo python3 injectionv2.py
+```
+
+The script expects the Kali capture interface and simulator target to match the
+current lab environment; update the constants near the top of the file if the
+router interface name or simulator address differs from the defaults.
 
 ### Guides and labs
 
@@ -173,16 +185,17 @@ network settings. The setup guide documents the reset details.
 
 ## Advanced student labs
 
-The three advanced labs use the live simulator and assigned Kali guest as
+The four advanced labs use the live simulator and assigned Kali guest as
 their testing scope:
 
 1. [Modbus/TCP traffic analysis and detection](./ADVANCED_LAB_01_OT_DETECTION_ENGINEERING.md)
 2. [OT/SCADA incident response](./ADVANCED_LAB_02_OT_INCIDENT_RESPONSE.md)
 3. [Modbus/TCP session state and segmentation](./ADVANCED_LAB_03_OT_SEGMENTATION_VALIDATION.md)
+4. [Modbus/TCP session analysis with Scapy](./ADVANCED_LAB_04_MODBUS_TCP_SESSION_ANALYSIS_SCAPY.md)
 
-The Scapy tutorial's packet-injection topic is addressed through TCP session
-state and capture analysis; the labs do not ask students to inject crafted
-packets into a live session. See the [SIEM/cyber-range design](./SIEM_CYBER_RANGE_DESIGN.md)
+The Scapy-focused lab examines packet structure, TCP session state, and offline
+capture analysis; it does not ask students to inject crafted packets into a
+live session. See the [SIEM/cyber-range design](./SIEM_CYBER_RANGE_DESIGN.md)
 for a proposed future expansion; it does not describe currently deployed
 services.
 

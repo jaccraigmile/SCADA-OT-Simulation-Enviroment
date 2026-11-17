@@ -10,6 +10,7 @@ from urllib.request import Request, urlopen
 
 
 def main() -> None:
+    """Send a reset or start request to the loopback-only simulator control endpoint."""
     parser = argparse.ArgumentParser(description=__doc__)
     action = parser.add_mutually_exclusive_group(required=True)
     action.add_argument(

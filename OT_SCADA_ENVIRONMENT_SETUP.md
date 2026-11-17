@@ -224,13 +224,34 @@ tcp.port == 502
 If Wireshark does not decode port `502` as Modbus/TCP automatically, select a
 packet and use **Analyze > Decode As** to decode that TCP port as Modbus/TCP.
 
-Start the shared read-only browser HMI on Kali in another terminal:
+Install the shared read-only HMI on Kali so it starts automatically at boot.
+From the repository directory on Kali, copy `simulator_monitor.py` to
+`/opt/factoryio/simulator_monitor.py`, then make sure the Kali login account
+owns and can read the application directory.
+The unit below runs as the default Kali account `kali`; if the account name is
+different on your VM, change `User=` and `Group=` in the unit file accordingly.
+Copy `systemd/simulator-monitor.service` to
+`/etc/systemd/system/simulator-monitor.service`, then enable and start it:
 
 ```bash
-python3 simulator_monitor.py --host 10.77.20.10 --port 502 --unit-id 1
+sudo install -d -o kali -g kali /opt/factoryio
+sudo cp simulator_monitor.py /opt/factoryio/simulator_monitor.py
+sudo chown kali:kali /opt/factoryio/simulator_monitor.py
+sudo cp systemd/simulator-monitor.service /etc/systemd/system/simulator-monitor.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now simulator-monitor.service
+sudo systemctl status simulator-monitor.service
 ```
 
-On Kali, open `http://127.0.0.1:8080/`. The page shows the simulated
+If your Kali username is not `kali`, replace `kali:kali` in the directory and
+ownership commands with your actual username and primary group.
+If you copied the Python file from Windows, ensure it has normal Unix line
+endings. The service binds the browser HMI to Kali loopback at
+`http://127.0.0.1:8080/`; it polls the simulator at `10.77.20.10:502`.
+After reboot, verify with `sudo systemctl is-active simulator-monitor.service`
+and open the same URL on Kali. To inspect startup errors, use
+`sudo journalctl -u simulator-monitor.service -b`.
+The page shows the simulated
 conveyor/picker, all Modbus input and output states, safety-door status, and
 connection freshness. It is read-only and sends only FC 2 and FC 1 polls.
 The process animation is inferred from I/O signals; exact machine position
@@ -777,36 +798,62 @@ a direct controller-to-simulator interface or bypass route.
 
    Transfer each unit file from the repository to its guest, install it at
    the destination shown above, then run `sudo systemctl daemon-reload` in
-   both Linux guests. Enable each service so it starts after a guest reboot:
+   both Linux guests. Enable and start each service now; enabling makes it
+   start automatically on future container boots:
 
    ```bash
-   sudo systemctl enable factoryio-simulator.service
+   sudo systemctl enable --now factoryio-simulator.service
    ```
 
    Run the corresponding command in the controller LXC:
 
    ```bash
-   sudo systemctl enable factoryio-controller.service
+   sudo systemctl enable --now factoryio-controller.service
    ```
 
+   Verify each service is active in its own LXC:
+
+   ```bash
+   sudo systemctl is-enabled factoryio-simulator.service
+   sudo systemctl is-active factoryio-simulator.service
+   ```
+
+   In the controller LXC, use `factoryio-controller.service` in both checks.
+   Both services should report `enabled` and `active`. The controller service
+   starts automatically, but its production sequence intentionally remains
+   disabled until an operator presses Start in the Windows Control VM HMI.
+   The controller service does not automatically restart if its process exits
+   or fails. If it starts before the simulator is reachable and then exits,
+   start it again after the simulator is available with
+   `sudo systemctl start factoryio-controller.service`. Because the unit is
+   enabled, it will still be started by systemd at boot. Reboot each LXC once
+   to verify boot startup, then repeat the `is-active` checks.
+
    The Windows Control VM does not use `systemd`; launch
-   `optionb_control_hmi.py` from PowerShell as shown below. Generate
-   a strong random API token on a trusted administration workstation:
+   `optionb_control_hmi.py` from PowerShell as shown in step 9. The
+   controller API requires a shared bearer token so the HMI can authenticate
+   its Start, Stop, and status requests. Generate one token on a trusted
+   administration workstation (not in the source tree or a shared terminal):
 
    ```bash
    openssl rand -hex 32
    ```
 
-   Store the generated value in `/etc/factoryio/controller.env` on the
-   controller LXC. The Windows HMI does not use or need
-   `/etc/factoryio/control-hmi.env`; its token is entered into the PowerShell
-   process when launching it, as shown in step 9. On the controller LXC, create
-   the directory and edit its environment file with the same generated token
-   on a line like `FACTORYIO_CONTROL_TOKEN=<generated-value>`:
+   The command prints a 64-character hexadecimal secret. Generate it once
+   and use that exact same value in both places: the controller LXC's
+   `/etc/factoryio/controller.env` file and the Windows HMI program. Do not
+   generate separate tokens for the controller and HMI. On the controller
+   LXC, create the directory and edit its environment file:
 
    ```bash
    sudo install -d -o root -g otlab -m 0750 /etc/factoryio
    sudoedit /etc/factoryio/controller.env
+   ```
+
+   Add this line, replacing the placeholder with the generated token:
+
+   ```text
+   FACTORYIO_CONTROL_TOKEN=<paste-the-generated-token-here>
    ```
 
    Set the Linux controller file's owner/group to `root:otlab` and mode to
@@ -817,8 +864,22 @@ a direct controller-to-simulator interface or bypass route.
    sudo chmod 0640 /etc/factoryio/controller.env
    ```
 
-   Keep the token out of source files and screenshots. The controller API
-   listens on `10.77.10.10:8082`; its bearer token is sent
+   On the Windows Control VM, open your local copy of
+   `optionb_control_hmi.py` in a text editor. Find the line:
+
+   ```python
+   HARDCODED_CONTROL_TOKEN = ""
+   ```
+
+   Paste the generated token between the quotes, save the file, and keep it
+   only in the private Windows VM working copy. Do not commit or share the
+   modified file: a hard-coded token is visible to anyone who can read the
+   source file. If the controller token changes, update both this constant
+   and `/etc/factoryio/controller.env` to the same value.
+
+   Treat the token like a password: do not put it in screenshots or send it
+   through an untrusted channel. The controller API listens on
+   `10.77.10.10:8082`; its bearer token is sent
    over HTTP, so keep the PLC-LAB isolated and permit that port only from
    `10.77.10.20`. The HMI itself binds to the Windows Control VM loopback at
    `127.0.0.1:8083`.
@@ -832,39 +893,94 @@ a direct controller-to-simulator interface or bypass route.
    `otlab@10.77.10.10` using a dedicated public key. Keep the private key on
    Kali. Restrict SSH ingress on the simulator to Kali's SIM-LAB address
    `10.77.20.1`, and on the controller to Kali's PLC-LAB address
-   `10.77.10.1`. On Kali, create the key and display its public half:
+   `10.77.10.1`. On Kali, create the dedicated key (skip `ssh-keygen` if it
+   already exists) and display its public half:
 
    ```bash
    ssh-keygen -t ed25519 -f ~/.ssh/factoryio-optionb
    cat ~/.ssh/factoryio-optionb.pub
    ```
 
-   From each container's Proxmox console, create the authorized-keys file,
-   paste the complete public-key line, and press Ctrl+D:
+   Install the **public** key in both Linux containers; never copy the private
+   key off Kali. Copy the entire single-line output from the `cat` command
+   above, then repeat the following steps separately in the Proxmox console
+   for the simulator LXC and the controller LXC. Sign in with an account that
+   can use `sudo`. First create `otlab`'s SSH directory:
+
 
    ```bash
    sudo install -d -o otlab -g otlab -m 0700 /home/otlab/.ssh
-   sudo tee /home/otlab/.ssh/authorized_keys >/dev/null
    ```
 
-   Then set ownership and permissions:
+   Start `tee` to append the key to `authorized_keys`:
+
+   ```bash
+   sudo tee -a /home/otlab/.ssh/authorized_keys >/dev/null
+   ```
+
+   The command will wait for input. Paste the complete public-key line copied
+   from Kali, press Enter, then press Ctrl+D to signal end-of-input and finish
+   the command. Do not paste the private key. Finally, set permissions and
+   verify that the public-key line is present:
 
    ```bash
    sudo chown otlab:otlab /home/otlab/.ssh/authorized_keys
    sudo chmod 0600 /home/otlab/.ssh/authorized_keys
+   sudo cat /home/otlab/.ssh/authorized_keys
    ```
 
-   In each container, add a sudoers drop-in with
-   `sudo visudo -f /etc/sudoers.d/otlab-factoryio` allowing `otlab` to run
-   only these service-management commands without a password:
+   The verification output should show the same public-key line on each LXC.
 
-   ```sudoers
+   Configure sudoers separately in each LXC. In the **simulator LXC**, run:
+
+   ```bash
+   sudo visudo -f /etc/sudoers.d/otlab-factoryio
+   ```
+
+   Add this single rule in the editor, save, and exit:
+
+   ```text
    otlab ALL=(root) NOPASSWD: /usr/bin/systemctl start factoryio-simulator.service, /usr/bin/systemctl stop factoryio-simulator.service, /usr/bin/systemctl restart factoryio-simulator.service, /usr/bin/systemctl is-active factoryio-simulator.service
    ```
 
-   Use `factoryio-controller.service` instead of
-   `factoryio-simulator.service` in the controller container's rule. Validate
-   the file with `sudo visudo -cf /etc/sudoers.d/otlab-factoryio`.
+   Validate it in the simulator LXC:
+
+   ```bash
+   sudo visudo -cf /etc/sudoers.d/otlab-factoryio
+   ```
+
+   In the **controller LXC**, run the same `visudo -f` command and add this
+   rule instead:
+
+   ```text
+   otlab ALL=(root) NOPASSWD: /usr/bin/systemctl start factoryio-controller.service, /usr/bin/systemctl stop factoryio-controller.service, /usr/bin/systemctl restart factoryio-controller.service, /usr/bin/systemctl is-active factoryio-controller.service
+   ```
+
+   Save and exit, then validate the controller LXC's file with:
+
+   ```bash
+   sudo visudo -cf /etc/sudoers.d/otlab-factoryio
+   ```
+
+   In each LXC, ensure the drop-in is owned by root and has mode `0440`:
+
+   ```bash
+   sudo chown root:root /etc/sudoers.d/otlab-factoryio
+   sudo chmod 0440 /etc/sudoers.d/otlab-factoryio
+   sudo visudo -cf /etc/sudoers.d/otlab-factoryio
+   ```
+
+   Check the effective permissions from an administrator account. Run the
+   matching command in each container:
+
+   ```bash
+   sudo -l -U otlab
+   ```
+
+   The listed allowed commands must name that container's exact service
+   (`factoryio-simulator.service` in the simulator LXC or
+   `factoryio-controller.service` in the controller LXC). If the command is
+   missing, correct the rule before trying the Kali launcher.
 5. On the controller LXC, restrict inbound TCP `8082` to the Control VM
    (`10.77.10.20`) using its host firewall. For example, with UFW:
 
@@ -879,27 +995,63 @@ a direct controller-to-simulator interface or bypass route.
    Review existing rules before enabling UFW on a guest; do not overwrite
    another firewall policy. Ensure no broader allow rule permits TCP `8082`
    from other sources. Keep SSH ingress limited to Kali as described above.
-   On Kali, copy `start_option_b_from_kali.sh` from this repository and make
-   it executable with `chmod +x start_option_b_from_kali.sh`. Test both
-   targets with the dedicated key:
+   On Kali, copy `start_option_b_from_kali.sh` from this repository. If it was
+   copied from a Windows checkout, convert Windows CRLF line endings to Unix
+   LF first; otherwise Kali may report `/usr/bin/env: 'bash\r': No such file
+   or directory` when you run it. Then make the script executable:
+
+   ```bash
+   sed -i 's/\r$//' start_option_b_from_kali.sh
+   chmod +x start_option_b_from_kali.sh
+   ```
+
+   Test both SSH targets with the dedicated key:
 
    ```bash
    ssh -i ~/.ssh/factoryio-optionb otlab@10.77.10.10 true
    ssh -i ~/.ssh/factoryio-optionb otlab@10.77.20.10 true
    ```
 
-   Set `SSH_IDENTITY_FILE=~/.ssh/factoryio-optionb` when invoking the
-   launcher, or load the key into the agent with `ssh-add` (required if the
-   private key has a passphrase). On first connection, verify the SSH host
-   keys interactively before using the launcher's non-interactive SSH calls.
+   If the key has no passphrase, tell the launcher which key file to use:
+
+   ```bash
+   SSH_IDENTITY_FILE="$HOME/.ssh/factoryio-optionb" ./start_option_b_from_kali.sh status
+   ```
+
+   If the private key has a passphrase, first load it into the SSH agent from
+   an interactive Kali terminal. Enter the passphrase at the prompt:
+
+   ```bash
+   ssh-add ~/.ssh/factoryio-optionb
+   ssh-add -l
+   ```
+
+   Then, in that same login session, connect to each guest interactively and
+   verify its SSH host-key fingerprint:
+
+   ```bash
+   ssh -i ~/.ssh/factoryio-optionb otlab@10.77.10.10 true
+   ssh -i ~/.ssh/factoryio-optionb otlab@10.77.20.10 true
+   ```
+
+   Once the host keys are verified, run the launcher in that same login
+   session without setting `SSH_IDENTITY_FILE`; it will use the unlocked key
+   from the agent. `BatchMode=yes` disables passphrase prompts inside the
+   launcher, so it cannot prompt to unlock the key. If the private key has no
+   passphrase, you can instead set `SSH_IDENTITY_FILE` when invoking it.
 6. Keep the simulator at `10.77.20.10:502`, unit ID `1`. From Kali, start,
    inspect, and stop the Option B services with:
 
    ```bash
-   SSH_IDENTITY_FILE=~/.ssh/factoryio-optionb ./start_option_b_from_kali.sh start
-   SSH_IDENTITY_FILE=~/.ssh/factoryio-optionb ./start_option_b_from_kali.sh status
-   SSH_IDENTITY_FILE=~/.ssh/factoryio-optionb ./start_option_b_from_kali.sh stop
+   ./start_option_b_from_kali.sh start
+   ./start_option_b_from_kali.sh status
+   ./start_option_b_from_kali.sh stop
    ```
+
+   These commands assume the passphrase-protected key is already loaded in
+   the SSH agent, as described above. For a key without a passphrase, prefix
+   each command with
+   `SSH_IDENTITY_FILE="$HOME/.ssh/factoryio-optionb"`.
 
    The `start` command starts the simulator and the controller service. The
    controller service remains active but its production sequence is stopped
@@ -937,16 +1089,13 @@ a direct controller-to-simulator interface or bypass route.
    in the project directory:
 
    ```powershell
-   $secureToken = Read-Host "Controller API token" -AsSecureString
-   $env:FACTORYIO_CONTROL_TOKEN = [System.Net.NetworkCredential]::new("", $secureToken).Password
    Set-Location C:\FactoryIO
    py -3 .\optionb_control_hmi.py --modbus-host 10.77.20.10 --modbus-port 502 --unit-id 1 --controller-api http://10.77.10.10:8082 --host 127.0.0.1 --port 8083
    ```
 
    Replace `C:\FactoryIO` if you chose a different project directory. The
-   token prompt is required in each new PowerShell session; the HMI reads the
-   token from its process environment. Keep this PowerShell window open while
-   using the HMI.
+   HMI reads the token from `HARDCODED_CONTROL_TOKEN` in the program. Keep
+   this PowerShell window open while using the HMI.
 
    Open `http://127.0.0.1:8083/` in the Control VM browser. The HMI shows
    controller state and RTU signals; Start and Stop operate the controller
@@ -986,6 +1135,14 @@ the Editor.
   container-specific `otlab` sudoers rule. Check service logs in the
   container with `sudo journalctl -u factoryio-simulator.service` or
   `sudo journalctl -u factoryio-controller.service`.
+- **Launcher prints a sudo refusal such as “I'm sorry otlab”:** SSH has
+  reached the LXC, but `sudo` is refusing the requested service command. In
+  that LXC, validate `/etc/sudoers.d/otlab-factoryio` with
+  `sudo visudo -cf /etc/sudoers.d/otlab-factoryio`, ensure it is owned by
+  `root:root` with mode `0440`, and inspect `sudo -l -U otlab`. Confirm the
+  allowed command names the correct service and exactly matches the rule
+  shown above. Repeat the checks in both LXCs; each has a different service
+  rule.
 - **Python controller cannot start:** Check Python 3.10+, simulator host/port,
   Slave ID `1`, and that the simulator is running. The controller exits with
   an error if its Modbus connection or response fails.

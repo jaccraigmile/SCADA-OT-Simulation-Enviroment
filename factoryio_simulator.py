@@ -53,6 +53,8 @@ TANK_MAX_TEMPERATURE = 100.0
 
 @dataclass
 class Process:
+    """Model the virtual conveyor, picker, and batch tank used by the simulator."""
+
     unit_id: int = 1
     emitter_interval: float = 5.0
     lock: threading.Lock = field(default_factory=threading.Lock)
@@ -74,6 +76,7 @@ class Process:
     request_counts: list[int] = field(default_factory=lambda: [0] * 16)
 
     def read_inputs(self) -> list[bool]:
+        """Return the current discrete input states derived from the process model."""
         with self.lock:
             now = time.monotonic()
             return [
@@ -101,6 +104,7 @@ class Process:
             ]
 
     def read_input_registers(self, address: int, count: int) -> list[int]:
+        """Read the tank telemetry registers from their current in-memory values."""
         with self.lock:
             values = [
                 round(self.tank_level * 10),
@@ -109,10 +113,12 @@ class Process:
             return values[address : address + count]
 
     def read_coils(self, address: int, count: int) -> list[bool]:
+        """Return the requested coil set without mutating the process state."""
         with self.lock:
             return self.coils[address : address + count]
 
     def write_coils(self, address: int, values: list[bool]) -> None:
+        """Apply a coil write and log any actuator state changes."""
         with self.lock:
             previous = self.coils[address : address + len(values)]
             self.coils[address : address + len(values)] = values
@@ -123,6 +129,7 @@ class Process:
                     self._record_event(f"Output {name} -> {state}")
 
     def reset(self) -> None:
+        """Restore the simulator to its startup state, clearing timers and process activity."""
         with self.lock:
             self.door_closed = True
             self.start_button_until = 0.0
@@ -142,37 +149,44 @@ class Process:
             self.request_counts = [0] * len(self.request_counts)
 
     def record_request(self, function: int) -> None:
+        """Count a Modbus request by function code for debugging and observability."""
         with self.lock:
             if 0 <= function < len(self.request_counts):
                 self.request_counts[function] += 1
 
     def drain_events(self) -> list[str]:
+        """Return the queued simulator events and clear the event buffer."""
         with self.lock:
             events = list(self.events)
             self.events.clear()
             return events
 
     def _record_event(self, message: str) -> None:
+        """Add a human-readable process event to the rolling event queue."""
         self.events.append(message)
 
     def set_start_button(self) -> None:
+        """Pulse the legacy StartButton input for a short interval."""
         with self.lock:
             self.start_button_until = time.monotonic() + 0.25
             self._record_event("Start button pressed (250 ms pulse)")
 
     def set_door(self, closed: bool) -> None:
+        """Open or close the simulated safety door and record the change."""
         with self.lock:
             if self.door_closed != closed:
                 self._record_event(f"Safety door {'closed' if closed else 'opened'}")
             self.door_closed = closed
 
     def set_auto_emitter(self, enabled: bool) -> None:
+        """Enable or disable the automatic conveyor box emitter."""
         with self.lock:
             if self.auto_emitter != enabled:
                 self._record_event(f"Automatic box emitter {'enabled' if enabled else 'disabled'}")
             self.auto_emitter = enabled
 
     def add_box(self) -> bool:
+        """Manually queue a box at the conveyor entry if the line is clear."""
         with self.lock:
             if self.box_position is not None:
                 return False
@@ -181,6 +195,7 @@ class Process:
             return True
 
     def status(self) -> str:
+        """Return a compact textual snapshot of the current process state."""
         inputs = self.read_inputs()
         coils = self.read_coils(0, COIL_COUNT)
         with self.lock:
@@ -195,6 +210,7 @@ class Process:
             )
 
     def step(self, now: float, dt: float) -> None:
+        """Advance the process by one simulation tick, including motion and tank dynamics."""
         with self.lock:
             if self.auto_emitter and self.box_position is None and not self.box_held:
                 if now - self.last_emission >= self.emitter_interval:
@@ -280,6 +296,7 @@ class Process:
                     self.box_position = None
 
     def live_status(self) -> str:
+        """Build a detailed operator-friendly snapshot of the live process model."""
         inputs = self.read_inputs()
         coils = self.read_coils(0, COIL_COUNT)
         with self.lock:
@@ -315,12 +332,14 @@ class Process:
 
 
 def _exception_response(function: int, code: int) -> bytes:
+    """Build a Modbus exception response for a failing request."""
     return bytes((function | 0x80, code))
 
 
 def _log_multiple_coil_write(
     address: int, values: list[bool], transaction_id: int | None
 ) -> None:
+    """Emit a readable console trace for a valid FC 15 coil write."""
     outputs = ", ".join(
         f"{COIL_NAMES[address + offset]}={'ON' if value else 'OFF'}"
         for offset, value in enumerate(values)
@@ -341,6 +360,7 @@ def _log_multiple_coil_write(
 def process_pdu(
     process: Process, pdu: bytes, transaction_id: int | None = None
 ) -> bytes:
+    """Handle a Modbus PDU for the in-memory process model and return a response."""
     if not pdu:
         return b""
 
@@ -411,7 +431,10 @@ def process_pdu(
 
 
 class ModbusHandler(socketserver.BaseRequestHandler):
+    """Serve a single Modbus/TCP socket and dispatch its requests to the simulator."""
+
     def handle(self) -> None:
+        """Receive one client connection and process a stream of Modbus/TCP requests."""
         client_host, client_port = self.client_address[:2]
 #        print(
 #            f"Modbus client connected: {client_host}:{client_port}",
@@ -461,6 +484,7 @@ class ModbusHandler(socketserver.BaseRequestHandler):
             )
 
     def _receive_exactly(self, count: int) -> bytes | None:
+        """Read exactly the requested number of bytes or return None on socket close."""
         data = bytearray()
         while len(data) < count:
             chunk = self.request.recv(count - len(data))
@@ -471,16 +495,22 @@ class ModbusHandler(socketserver.BaseRequestHandler):
 
 
 class ModbusServer(socketserver.ThreadingTCPServer):
+    """Threaded Modbus/TCP server for the process simulator."""
+
     allow_reuse_address = True
     daemon_threads = True
 
     def __init__(self, address: tuple[str, int], process: Process):
+        """Attach the shared Process model to the threaded Modbus server instance."""
         self.process = process
         super().__init__(address, ModbusHandler)
 
 
 class ResetHandler(BaseHTTPRequestHandler):
+    """Process health and reset/start actions on the loopback-tied control endpoint."""
+
     def do_GET(self) -> None:
+        """Return 204 when the simulator is ready for local reset or start requests."""
         if self.path != "/health":
             self.send_error(404)
             return
@@ -489,6 +519,7 @@ class ResetHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_POST(self) -> None:
+        """Pulse the start input or reset the simulation model in place."""
         if self.path == "/start":
             self.server.process.set_start_button()
         elif self.path == "/reset":
@@ -501,18 +532,23 @@ class ResetHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def log_message(self, _format: str, *_args: object) -> None:
+        """Silence noisy HTTP request logging for the local reset endpoint."""
         del _format, _args
 
 
 class ResetServer(ThreadingHTTPServer):
+    """HTTP server that exposes local simulator reset and start endpoints."""
+
     daemon_threads = True
 
     def __init__(self, address: tuple[str, int], process: Process):
+        """Bind the reset server to a process object that it can reset and start."""
         self.process = process
         super().__init__(address, ResetHandler)
 
 
 def run_simulation(process: Process, tick: float) -> None:
+    """Advance the simulator forever at a fixed interval to update the process model."""
     last = time.monotonic()
     while True:
         time.sleep(tick)
@@ -522,6 +558,7 @@ def run_simulation(process: Process, tick: float) -> None:
 
 
 def run_cli(process: Process) -> None:
+    """Run the interactive command loop used by the simulator terminal prompt."""
     print(
         "Commands: start, box, door open|close, auto on|off, "
         "coil <name> on|off, reset, status, help, quit"
@@ -575,6 +612,7 @@ def run_cli(process: Process) -> None:
 
 
 def main() -> None:
+    """Parse the simulator configuration, start the servers, and keep the process alive."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--host", default="0.0.0.0", help="bind address (default: all interfaces)")
     parser.add_argument(

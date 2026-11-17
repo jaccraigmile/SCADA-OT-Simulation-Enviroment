@@ -30,6 +30,7 @@ DEFAULT_MODBUS_PORT = 502
 
 
 def receive_exactly(connection: socket.socket, length: int) -> bytes:
+    """Read an exact number of bytes from a socket, retrying until the stream is complete."""
     data = bytearray()
     while len(data) < length:
         chunk = connection.recv(length - len(data))
@@ -40,6 +41,8 @@ def receive_exactly(connection: socket.socket, length: int) -> bytes:
 
 
 class ModbusTCPClient:
+    """Small Modbus/TCP client used to drive the simulator from the Python controller."""
+
     def __init__(
         self,
         host: str,
@@ -47,6 +50,7 @@ class ModbusTCPClient:
         unit_id: int,
         timeout: float,
     ) -> None:
+        """Capture the target simulator endpoint and connection settings."""
         self.host = host
         self.port = port
         self.unit_id = unit_id
@@ -55,6 +59,7 @@ class ModbusTCPClient:
         self.connection: socket.socket | None = None
 
     def connect(self) -> None:
+        """Open a socket to the configured simulator endpoint."""
         self.close()
         self.connection = socket.create_connection(
             (self.host, self.port), timeout=self.timeout
@@ -62,11 +67,13 @@ class ModbusTCPClient:
         self.connection.settimeout(self.timeout)
 
     def close(self) -> None:
+        """Close an active Modbus connection and clear the handle."""
         if self.connection is not None:
             self.connection.close()
             self.connection = None
 
     def _exchange(self, pdu: bytes) -> bytes:
+        """Send a Modbus request and validate the matching response header and payload."""
         if self.connection is None:
             raise ConnectionError("Modbus client is not connected")
 
@@ -101,6 +108,7 @@ class ModbusTCPClient:
         return response
 
     def read_bits(self, function: int, count: int) -> list[bool]:
+        """Read a bit field using Modbus function codes 01 or 02."""
         if function not in (1, 2):
             raise ValueError("bit reads must use function code 1 or 2")
         request = struct.pack(">BHH", function, 0, count)
@@ -117,9 +125,11 @@ class ModbusTCPClient:
         ]
 
     def read_inputs(self) -> list[bool]:
+        """Read the simulator's discrete input map as a list of booleans."""
         return self.read_bits(2, INPUT_COUNT)
 
     def write_coils(self, values: list[bool]) -> None:
+        """Write all five controller output coils in a single FC 15 request."""
         if len(values) != COIL_COUNT:
             raise ValueError(f"expected {COIL_COUNT} coil values")
         byte_count = (len(values) + 7) // 8
@@ -137,11 +147,13 @@ class ModbusTCPClient:
             raise ValueError("invalid FC 15 write response")
 
     def write_all_coils_off(self) -> None:
+        """Force all controller output coils to the off state."""
         self.write_coils([False] * COIL_COUNT)
 
 
 @dataclass
 class Controller:
+    """Coordinate a production cycle using the simulator's Modbus input/output map."""
     client: ModbusTCPClient
     poll_interval: float
     status_interval: float
@@ -156,14 +168,17 @@ class Controller:
     control_lock: threading.RLock = dataclass_field(default_factory=threading.RLock)
 
     def __post_init__(self) -> None:
+        """Initialize the controller state after dataclass construction."""
         if self.coil_states is None:
             self.coil_states = [False] * COIL_COUNT
         self.next_status = time.monotonic()
 
     def log(self, message: str) -> None:
+        """Print a timestamped controller status line for operator and debugging visibility."""
         print(f"[{time.strftime('%H:%M:%S')}] {message}", flush=True)
 
     def set_outputs(self, values: list[bool]) -> None:
+        """Send a new coil set to the simulator only when it changes."""
         with self.control_lock:
             assert self.coil_states is not None
             if self.coil_states != values:
@@ -180,6 +195,7 @@ class Controller:
                         )
 
     def request_start(self) -> bool:
+        """Enable the production cycle unless the safety door is open."""
         with self.control_lock:
             if self.last_inputs is not None and not self.last_inputs[1]:
                 return False
@@ -192,6 +208,7 @@ class Controller:
             return True
 
     def request_stop(self) -> None:
+        """Disable the controller and leave the simulator in a safe idle state."""
         with self.control_lock:
             was_running = self.run_enabled
             self.run_enabled = False
@@ -202,6 +219,7 @@ class Controller:
                 self.log("Operator Stop command received; outputs disabled")
 
     def control_status(self) -> dict[str, object]:
+        """Return the current run state and recent I/O snapshot for the HTTP API."""
         with self.control_lock:
             return {
                 "run_enabled": self.run_enabled,
@@ -219,6 +237,7 @@ class Controller:
             }
 
     def reset_for_safety(self) -> None:
+        """Stop the controller immediately when the safety door opens."""
         self.set_outputs([False] * COIL_COUNT)
         if self.run_enabled or self.state != "SAFETY_STOP":
             self.log("Safety door open; controller stopped")
@@ -228,6 +247,7 @@ class Controller:
         self.robot_detected_seen = False
 
     def scan(self, now: float) -> None:
+        """Poll the simulator, validate the safety state, and drive the next machine action."""
         with self.control_lock:
             inputs = self.client.read_inputs()
             self.last_inputs = inputs
@@ -325,6 +345,7 @@ class Controller:
                 self.next_status = now + self.status_interval
 
     def run(self) -> None:
+        """Run the controller loop until the process is stopped or the client disconnects."""
         self.client.connect()
         self.client.write_all_coils_off()
         self.coil_states = [False] * COIL_COUNT
@@ -348,14 +369,20 @@ class Controller:
 def make_control_handler(
     controller: Controller, token: str | None
 ) -> type[BaseHTTPRequestHandler]:
+    """Create the authenticated HTTP handler for controller start, stop, and status."""
+
     class ControllerControlHandler(BaseHTTPRequestHandler):
+        """Serve the authenticated HTTP control API for the Python production controller."""
+
         def _authorized(self) -> bool:
+            """Check whether the incoming request included the configured control token."""
             if token is None:
                 return True
             supplied = self.headers.get("Authorization", "")
             return secrets.compare_digest(supplied, f"Bearer {token}")
 
         def _respond(self, status: int, payload: dict[str, object]) -> None:
+            """Serialize a JSON response and send it with the controller API headers."""
             content = json.dumps(payload).encode("utf-8")
             self.send_response(status)
             self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -366,6 +393,7 @@ def make_control_handler(
             self.wfile.write(content)
 
         def _handle_control(self) -> None:
+            """Handle the /api/status, /api/start, and /api/stop routes for the operator API."""
             if not self._authorized():
                 self._respond(401, {"error": "unauthorized"})
                 return
@@ -386,18 +414,23 @@ def make_control_handler(
                 self._respond(404, {"error": "not found"})
 
         def do_GET(self) -> None:
+            """Dispatch GET requests to the controller management API."""
             self._handle_control()
 
         def do_POST(self) -> None:
+            """Dispatch POST requests to the controller management API."""
             self._handle_control()
 
         def log_message(self, _format: str, *_args: object) -> None:
+            """Suppress noisy request logs for the operator API to keep the console clean."""
             del _format, _args
 
     return ControllerControlHandler
 
 
 class ControllerControlServer(ThreadingHTTPServer):
+    """HTTP server that exposes the controller's operator API."""
+
     daemon_threads = True
     allow_reuse_address = True
 
@@ -407,10 +440,12 @@ class ControllerControlServer(ThreadingHTTPServer):
         controller: Controller,
         token: str | None,
     ) -> None:
+        """Create the HTTP server bound to the controller's operator API endpoints."""
         super().__init__(address, make_control_handler(controller, token))
 
 
 def main() -> None:
+    """Parse CLI options, start the controller HTTP API, and run the production cycle."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--host", default="10.77.20.10", help="simulator IP address")
     parser.add_argument(

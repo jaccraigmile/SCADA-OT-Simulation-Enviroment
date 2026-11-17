@@ -1,7 +1,31 @@
-from scapy.all import * 
+"""Capture and validate a Modbus/TCP write packet for the lab's Scapy exercise.
+
+This program is intentionally limited to the isolated training network. It is a
+lab-only security exercise that listens for a valid Modbus/TCP FC 15 write to
+coils, validates the encoded request structure, and prints the crafted payload in
+hex and packet form so students can study TCP/Modbus framing and packet-forgery
+concepts. It is not part of the operational simulator workflow, is not a
+production control path, and should not be used against the live process or any
+off-limits host.
+
+Run it from the Kali router in the training lab with:
+
+    sudo python3 injectionv2.py
+
+The script assumes the capture interface is `eth2` and the victim is
+`10.77.20.10`; update the constants in the file to match the actual Kali
+router interface and simulator address before use.
+
+The script demonstrates what a valid Modbus/TCP write looks like in a packet
+capture, and then shows the same structure in a standalone Scapy packet. The
+purpose is education and defensive analysis within the lab network, not live
+injection or control-plane manipulation.
+"""
+
+from scapy.all import *
 from scapy.all import *
 from scapy.compat import raw
-import struct 
+import struct
 
 flag = True
 your_iface = "eth2"
@@ -94,6 +118,8 @@ UNIT_ID = 1
 
 
 class ModbusTCP(Packet):
+    """Represent the Modbus/TCP MBAP header used in a crafted FC 15 request."""
+
     name = "ModbusTCP"
 
     fields_desc = [
@@ -104,6 +130,7 @@ class ModbusTCP(Packet):
     ]
 
     def post_build(self, pkt, pay):
+        """Populate the length field after the MBAP header and payload are assembled."""
         pkt += pay
 
         if self.length is None:
@@ -115,6 +142,8 @@ class ModbusTCP(Packet):
 
 
 class ModbusWriteMultipleCoils(Packet):
+    """Represent a Modbus FC 15 write-multiple-coils request body."""
+
     name = "ModbusWriteMultipleCoils"
 
     fields_desc = [
@@ -128,6 +157,7 @@ class ModbusWriteMultipleCoils(Packet):
 
 
 def validate_frame(pkt):
+    """Validate the packet structure, bit count, and byte count before transmission."""
     modbus = pkt[ModbusWriteMultipleCoils]
 
     expected_byte_count = (modbus.bit_count + 7) // 8

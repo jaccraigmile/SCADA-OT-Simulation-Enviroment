@@ -371,6 +371,7 @@ HMI_PAGE = """<!doctype html>
 
 
 def receive_exactly(connection: socket.socket, length: int) -> bytes:
+    """Read a fixed-length Modbus response from a socket, raising on early close."""
     data = bytearray()
     while len(data) < length:
         chunk = connection.recv(length - len(data))
@@ -381,6 +382,8 @@ def receive_exactly(connection: socket.socket, length: int) -> bytes:
 
 
 class ModbusExceptionError(ValueError):
+    """Wrap a Modbus exception message with the original request context."""
+
     def __init__(self, function: int, code: int, address: int, count: int) -> None:
         self.function = function
         self.code = code
@@ -400,6 +403,7 @@ def read_bits(
     count: int,
     address: int = 0,
 ) -> list[bool]:
+    """Fetch a bit field from the simulator using a Modbus/TCP request."""
     request_pdu = struct.pack(">BHH", function, address, count)
     request_header = struct.pack(">HHHB", transaction_id, 0, len(request_pdu) + 1, unit_id)
     connection.sendall(request_header + request_pdu)
@@ -440,6 +444,7 @@ def read_input_registers(
     address: int,
     count: int,
 ) -> list[int]:
+    """Read the tank telemetry registers exposed by the simulator."""
     request_pdu = struct.pack(">BHH", 4, address, count)
     request_header = struct.pack(">HHHB", transaction_id, 0, len(request_pdu) + 1, unit_id)
     connection.sendall(request_header + request_pdu)
@@ -475,6 +480,8 @@ def read_input_registers(
 def read_snapshot(
     connection: socket.socket, transaction_id: int, unit_id: int
 ) -> tuple[dict[str, bool], dict[str, bool], dict[str, float | None], int]:
+    """Collect the current simulator inputs, coils, and tank metrics in one snapshot."""
+
     def read_bits_next(function: int, count: int, address: int = 0) -> list[bool]:
         nonlocal transaction_id
         values = read_bits(
@@ -541,7 +548,10 @@ def read_snapshot(
 
 
 class HMIState:
+    """Track the last-known Modbus inputs, coils, and tank telemetry for the browser UI."""
+
     def __init__(self) -> None:
+        """Initialize the empty snapshot that the web dashboard will render while polling."""
         self._lock = threading.Lock()
         self._snapshot: dict[str, Any] = {
             "connected": False,
@@ -562,6 +572,7 @@ class HMIState:
         process: dict[str, float | None] | None = None,
         error: str | None = None,
     ) -> None:
+        """Refresh the cached snapshot with the newest Modbus readings or an error."""
         with self._lock:
             if inputs is not None and coils is not None:
                 self._snapshot["inputs"] = inputs.copy()
@@ -582,6 +593,7 @@ class HMIState:
                 self._snapshot["error"] = error
 
     def get(self) -> dict[str, Any]:
+        """Return a safe copy of the current snapshot for the web API and dashboard."""
         with self._lock:
             return {
                 **self._snapshot,
@@ -592,6 +604,8 @@ class HMIState:
 
 
 class ModbusPoller(threading.Thread):
+    """Background reader that polls the simulator and updates the browser snapshot."""
+
     def __init__(
         self,
         state: HMIState,
@@ -601,6 +615,7 @@ class ModbusPoller(threading.Thread):
         interval: float,
         timeout: float,
     ) -> None:
+        """Prepare the background thread that polls Modbus and keeps the dashboard fresh."""
         super().__init__(name="modbus-poller", daemon=True)
         self.state = state
         self.host = host
@@ -613,6 +628,7 @@ class ModbusPoller(threading.Thread):
         self.transaction_id = 0
 
     def run(self) -> None:
+        """Continuously read the simulator state until the poller is stopped."""
         while not self.stop_event.is_set():
             try:
                 if self.connection is None:
@@ -641,12 +657,18 @@ class ModbusPoller(threading.Thread):
             self.connection = None
 
     def stop(self) -> None:
+        """Signal the poller thread to exit cleanly."""
         self.stop_event.set()
 
 
 def make_handler(state: HMIState) -> type[BaseHTTPRequestHandler]:
+    """Create the HTTP handler that serves the dashboard and JSON status payload."""
+
     class HMIRequestHandler(BaseHTTPRequestHandler):
+        """Serve the static HTML dashboard and the JSON snapshot API for the HMI."""
+
         def do_GET(self) -> None:
+            """Serve the HMI dashboard HTML or the current JSON status snapshot."""
             if self.path == "/":
                 content = HMI_PAGE.encode("utf-8")
                 content_type = "text/html; charset=utf-8"
@@ -666,17 +688,21 @@ def make_handler(state: HMIState) -> type[BaseHTTPRequestHandler]:
             self.wfile.write(content)
 
         def log_message(self, _format: str, *_args: Any) -> None:
+            """Silence noisy request logging for the read-only training dashboard."""
             del _format, _args
 
     return HMIRequestHandler
 
 
 class HMIServer(ThreadingHTTPServer):
+    """HTTP server for the read-only process dashboard and status API."""
+
     daemon_threads = True
     allow_reuse_address = True
 
 
 def main() -> None:
+    """Start the Modbus poller and serve the HMI web dashboard for the simulator."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--host", default="10.77.20.10", help="simulator IP address")
     parser.add_argument(

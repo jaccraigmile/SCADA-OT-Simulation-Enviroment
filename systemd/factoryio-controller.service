@@ -12,8 +12,7 @@ WorkingDirectory=/opt/factoryio
 ExecStart=/usr/bin/python3 /opt/factoryio/factoryio_modbus_controller.py --host 10.77.20.10 --port 502 --unit-id 1 --control-host 10.77.10.10 --control-port 8082
 KillSignal=SIGINT
 TimeoutStopSec=15
-Restart=on-failure
-RestartSec=2
+Restart=no
 
 [Install]
 WantedBy=multi-user.target

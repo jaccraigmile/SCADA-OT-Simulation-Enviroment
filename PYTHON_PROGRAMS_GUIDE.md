@@ -35,9 +35,17 @@ service-control helper. `injectionv2.py` captures a valid Modbus/TCP write to
 coils, validates the frame structure, and then sends a crafted `FC 15` packet
 with a matching transaction ID to exercise packet-forgery and detection
 topics in the isolated lab. It uses Scapy and should only be run against the
-training network. `start_option_b_from_kali.sh` is a bash automation wrapper
-that starts, stops, or checks the simulator and controller systemd services
-from Kali after SSHing to the lab guests.
+training network. On the Kali router, run it with:
+
+```bash
+sudo python3 injectionv2.py
+```
+
+The script uses the default interface `eth2` and simulator target
+`10.77.20.10`; update those constants in the file to match the active lab
+adapter and host before any capture. `start_option_b_from_kali.sh` is a bash
+automation wrapper that starts, stops, or checks the simulator and controller
+systemd services from Kali after SSHing to the lab guests.
 
 ## `factoryio_simulator.py`
 
@@ -221,21 +229,24 @@ the controller-managed line outputs at addresses 0–4.
 
 The HMI acts as a local web proxy: its server-side requests use a bearer token
 to call the controller API and a separate Modbus/TCP connection for plant
-telemetry and tank coil commands. The token is read from
-`FACTORYIO_CONTROL_TOKEN`; it is never sent to the browser. The HMI is bound
-to loopback by default and rejects non-loopback web binds. It runs on the
-Windows Control VM as a training interface, not as a safety-rated controller or
+telemetry and tank coil commands. The token is never sent to the browser. On
+the Windows Control VM, configure `HARDCODED_CONTROL_TOKEN` in the private
+local copy of this script, or provide the token through `FACTORYIO_CONTROL_TOKEN`
+or `--control-token`. A hard-coded token is visible in the source file; do not
+commit or share a copy containing the real token. The HMI is bound to loopback
+by default and rejects non-loopback web binds. It runs on the Windows Control
+VM as a training interface, not as a safety-rated controller or
 physical-process HMI.
 
-On Windows, set `FACTORYIO_CONTROL_TOKEN` in the PowerShell process used to
-launch the HMI, then run it from the project directory:
+After configuring the token, run the HMI from PowerShell in the project
+directory:
 
 ```powershell
 py -3 .\optionb_control_hmi.py --modbus-host 10.77.20.10 --modbus-port 502 --unit-id 1 --controller-api http://10.77.10.10:8082 --host 127.0.0.1 --port 8083
 ```
 
-See the environment setup guide for the secure token prompt and complete
-Windows launch steps.
+See the environment setup guide for the matching controller token setup and
+complete Windows launch steps.
 
 ## `simulator_monitor.py`
 
@@ -254,6 +265,8 @@ python3 simulator_monitor.py --host 10.77.20.10 --port 502 --unit-id 1
 The HTTP server defaults to `127.0.0.1:8080`. `--web-host` can bind it to a
 specific reachable interface when needed; avoid binding an unauthenticated
 display to untrusted networks.
+In the lab deployment, `systemd/simulator-monitor.service` on Kali can launch
+this read-only HMI at boot and restart it after failures.
 
 ### Reading and storing signals
 
