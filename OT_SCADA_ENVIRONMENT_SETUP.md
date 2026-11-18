@@ -1085,17 +1085,21 @@ a direct controller-to-simulator interface or bypass route.
    ```
 
    The route must go through `10.77.10.1` and the TCP connection must succeed.
-9. On the Windows Control VM, launch the operator HMI from a PowerShell session
-   in the project directory:
+9. On the Windows Control VM, launch the operator HMI using the included batch
+   file. Double-click `start_optionb_control_hmi.bat` in the project directory,
+   or run it from PowerShell:
 
    ```powershell
    Set-Location C:\FactoryIO
-   py -3 .\optionb_control_hmi.py --modbus-host 10.77.20.10 --modbus-port 502 --unit-id 1 --controller-api http://10.77.10.10:8082 --host 127.0.0.1 --port 8083
+   .\start_optionb_control_hmi.bat
    ```
 
    Replace `C:\FactoryIO` if you chose a different project directory. The
-   HMI reads the token from `HARDCODED_CONTROL_TOKEN` in the program. Keep
-   this PowerShell window open while using the HMI.
+   batch file changes to its own project directory and runs the same Python
+   command and network settings as the manual launch. It requires the Python
+   launcher (`py -3`) to be installed and available on `PATH`. The HMI reads
+   the token from `HARDCODED_CONTROL_TOKEN` in the program. Keep the batch
+   window open while using the HMI.
 
    Open `http://127.0.0.1:8083/` in the Control VM browser. The HMI shows
    controller state and RTU signals; Start and Stop operate the controller
